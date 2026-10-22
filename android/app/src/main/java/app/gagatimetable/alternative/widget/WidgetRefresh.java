@@ -1,4 +1,4 @@
-package app.timetable.widget;
+package app.gagatimetable.alternative.widget;
 
 import android.app.AlarmManager;
 import android.app.PendingIntent;
@@ -17,7 +17,7 @@ import java.util.Calendar;
  * Android 12 起普通 set() 可能推迟到一小时后才送达，所以能用精确闹钟就用精确闹钟。
  */
 public class WidgetRefresh extends BroadcastReceiver {
-    private static final String ACTION = "app.timetable.WIDGET_REFRESH";
+    private static final String ACTION = "app.gagatimetable.alternative.WIDGET_REFRESH";
     private static final long MINUTE = 60_000L;
 
     @Override

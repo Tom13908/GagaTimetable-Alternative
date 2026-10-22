@@ -54,7 +54,7 @@ describe('导入 → 修改 → 调课 → 再导入 → 重启', () => {
     const moved = occurrencesOn(snap, '2026-09-10').find((o) => o.name === '大学英语')!
     expect(moved).toMatchObject({ status: 'moved', startPeriod: 7, endPeriod: 8 })
 
-    const events = planCalendar(snap, [], defaultPrefs(), new Date('2026-09-01T00:00:00Z'))
+    const events = planCalendar(snap, [], { ...defaultPrefs(), classRemind: true, taskRemind: true }, new Date('2026-09-01T00:00:00Z'))
     const titles = events.map((e) => e.event.title)
     expect(titles.some((t) => t.includes('高数（上）') && t.includes('停课'))).toBe(true)
     expect(titles.some((t) => t.includes('大学英语') && t.includes('调课'))).toBe(true)

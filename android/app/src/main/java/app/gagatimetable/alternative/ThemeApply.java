@@ -1,4 +1,4 @@
-package app.timetable;
+package app.gagatimetable.alternative;
 
 import android.app.Activity;
 import android.content.Context;

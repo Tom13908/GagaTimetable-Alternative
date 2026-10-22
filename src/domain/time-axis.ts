@@ -25,8 +25,10 @@ export interface TimeAxis {
   y(t: Minutes): number
 }
 
-/** 行高上限：两行课名 + 两行地点 */
-export const AXIS_ROW = 60
+/** 行高上限：三行课名 + 一行地点 + 右下角贴纸（手机一列 37px 时文字只能这么排） */
+export const AXIS_ROW = 74
+/** 大屏上把行拉高补满可视区时，单行最多再加这么多（再高就散了） */
+export const AXIS_ROW_STRETCH = 28
 /** 行高下限：空行、连堂课的后半节；左侧序号 + 时刻刚好放下 */
 export const AXIS_ROW_MIN = 32
 export const AXIS_GAP = 6
@@ -49,9 +51,22 @@ function linear(t0: Minutes, t1: Minutes, y0: number, kind: AxisSeg['kind']): Ax
   return { kind, t0, t1, y0, y1: y0 + ((t1 - t0) / 60) * AXIS_PAD_PER_HOUR }
 }
 
-export function buildAxis(grid: TimeSlot[], span?: { start: Minutes; end: Minutes }, rows?: Map<number, number>): TimeAxis {
+/**
+ * @param rowBonus 每行额外加高多少（大屏上把格子拉高、补满可视区用）；0 就是手机的原有行高
+ *
+ * 行高**全表统一**，取各行里最高的那条需求：以前每行按自己的需求定高，空行 32、有课的行 46，
+ * 于是同样两节连排的卡片，落在空行附近只有 67px、落在满行附近有 95px——用户看到的就是
+ * 「都是两节课，卡片一边大一边小」，网格线也跟着忽高忽低。统一之后每张单节卡、每张两节卡都一样高。
+ */
+export function buildAxis(grid: TimeSlot[], span?: { start: Minutes; end: Minutes }, rows?: Map<number, number>, rowBonus = 0): TimeAxis {
   const slots = [...grid].filter((s) => s.end > s.start).sort((a, b) => a.start - b.start)
-  const rowH = (index: number) => (rows ? Math.min(AXIS_ROW, Math.max(AXIS_ROW_MIN, Math.ceil(rows.get(index) ?? 0))) : AXIS_ROW)
+  let uniform = AXIS_ROW
+  if (rows) {
+    let max = AXIS_ROW_MIN
+    for (const v of rows.values()) max = Math.max(max, v)
+    uniform = Math.min(AXIS_ROW, Math.max(AXIS_ROW_MIN, Math.ceil(max)))
+  }
+  const rowH = () => (rowBonus > 0 ? Math.min(AXIS_ROW + AXIS_ROW_STRETCH, uniform + rowBonus) : uniform)
   const segs: AxisSeg[] = []
   let y = 0
   const push = (s: AxisSeg) => {
@@ -74,7 +89,7 @@ export function buildAxis(grid: TimeSlot[], span?: { start: Minutes; end: Minute
         else if (gap > 0) push({ kind: 'gap', t0: cursor, t1: t0, y0: y, y1: y + AXIS_GAP })
       }
       if (s.end > t0) {
-        push({ kind: 'period', t0, t1: s.end, y0: y, y1: y + rowH(s.index), index: s.index })
+        push({ kind: 'period', t0, t1: s.end, y0: y, y1: y + rowH(), index: s.index })
         cursor = s.end
       }
     })
@@ -96,8 +111,8 @@ export function buildAxis(grid: TimeSlot[], span?: { start: Minutes; end: Minute
 
 /**
  * 卡片按自身高度和宽度决定课名、地点各排几行：先保课名，再保地点，两者都按可用宽度折行而不是一刀截断。
- * 行高：课名 9.5px/1.3 = 12.35，地点 8.5px/1.25 = 10.625；地点上方 2px；内边距上下各 4（dense 为 2）。
- * 一节课（60 - 3 内缩）恰好放下两行课名 + 两行地点。
+ * 行高：课名 10px/1.3 = 13，地点 9px/1.25 = 11.25；地点上方 2px；内边距上下各 4（dense 为 2）。
+ * 一节课（74 - 3 内缩，再扣掉右下角贴纸）恰好放下三行课名 + 一行地点。
  */
 export interface CardFit {
   nameLines: number
@@ -105,20 +120,37 @@ export interface CardFit {
   dense: boolean
 }
 
-export const CARD_LINE = 12.35
-export const CARD_LOC_LINE = 10.625
+export const CARD_LINE = 13
+export const CARD_LOC_LINE = 11.25
 export const CARD_LOC_GAP = 2
-export const CARD_PAD = 4
+export const CARD_PAD = 3
 export const CARD_PAD_DENSE = 2
-export const CARD_PAD_X = 4
-export const CARD_NAME_PX = 9.5
-export const CARD_LOC_PX = 8.5
+/* 左右内边距：手机一列只有 37px，4px 的边距会让可用宽度掉到 29px——刚好卡在两字一行，
+   课名全被拆成「计算/机组/成原/理…」。收到 2px 后可用 33.4px，三字一行，同一高度能多读一个字。 */
+export const CARD_PAD_X = 2
+export const CARD_NAME_PX = 10
+export const CARD_LOC_PX = 9
+/** 课名最多排几行：再长也读不完，四行之后交给省略号（单节卡片实际只给得出三行，跨节的卡才用得上第四行） */
+export const CARD_NAME_MAX = 4
+export const CARD_LOC_MAX = 2
 
-/** 粗估单字宽度（em，按粗体偏宽估）：全角 1，大写 0.72，数字 0.64，小写 0.58，空格 0.3，其余 ASCII 0.6 */
+/**
+ * 贴纸边长按列宽缩：手机一列 37px，再大就会占掉半个卡宽。
+ * reserve() 是它在卡片右下角占掉的高度——排字时先把这一块让出来，字就不会被贴纸压住。
+ */
+export function stickerSize(w: number): number {
+  return w < 48 ? 14 : w < 66 ? 17 : 20
+}
+
+export function stickerReserve(w: number): number {
+  return stickerSize(w) - 2
+}
+
+/** 粗估单字宽度（em，按粗体偏宽估）：全角 1，大写 0.72，数字 0.67（实测 9px 半粗数字约 6px），小写 0.58，空格 0.3，其余 ASCII 0.6 */
 function charEm(ch: string): number {
   const c = ch.codePointAt(0) ?? 0
   if (c === 0x20) return 0.3
-  if (c < 0x80) return /[A-Z]/.test(ch) ? 0.72 : /[0-9]/.test(ch) ? 0.64 : /[a-z]/.test(ch) ? 0.58 : 0.6
+  if (c < 0x80) return /[A-Z]/.test(ch) ? 0.72 : /[0-9]/.test(ch) ? 0.67 : /[a-z]/.test(ch) ? 0.58 : 0.6
   return 1
 }
 
@@ -133,7 +165,12 @@ function tokens(s: string): string[] {
   return s.match(/\s+|[^\s\u0080-\uffff]+|./gu) ?? []
 }
 
-/** 按 overflow-wrap:anywhere 贪心折行后的行数：优先在空格/全角字之间换行，英数段放不下整行时才拆字 */
+/**
+ * 按 overflow-wrap:anywhere 贪心折行后的行数：优先在空格/全角字之间换行，
+ * 一个词在行尾放不下时**先把这一行的剩余宽度塞满**再换行（浏览器就是这么断的）。
+ * 早先只在「整个词比一行还宽」时才拆词，于是「(罗文)2教301」被算成三行、
+ * 实际只排两行，地点就被白白截掉一截。
+ */
 function linesFor(s: string, px: number, w: number): number {
   if (!s) return 0
   const max = Math.max(1, w)
@@ -145,22 +182,21 @@ function linesFor(s: string, px: number, w: number): number {
       if (cur > 0) space = textWidth(t, px)
       continue
     }
-    const tw = textWidth(t, px)
-    if (cur > 0 && cur + space + tw > max) {
-      lines++
-      cur = 0
-    } else cur += space
+    cur += space
     space = 0
-    if (tw > max) {
-      for (const ch of t) {
-        const cw = charEm(ch) * px
-        if (cur > 0 && cur + cw > max) {
-          lines++
-          cur = 0
-        }
-        cur += cw
+    const tw = textWidth(t, px)
+    if (cur + tw <= max) {
+      cur += tw
+      continue
+    }
+    for (const ch of t) {
+      const cw = charEm(ch) * px
+      if (cur > 0 && cur + cw > max) {
+        lines++
+        cur = 0
       }
-    } else cur += tw
+      cur += cw
+    }
   }
   return lines
 }
@@ -171,8 +207,9 @@ function locBase(loc: string, aw: number): string {
 }
 
 /**
- * 地点排不下时先去掉空格再试；仍排不下就从头部截掉、保留尾部的楼层房号（「第二教学楼 B-301」→「…学楼B-301」），
- * 而不是让排版从尾部省略掉最有用的房号。
+ * 地点排不下时按「最不值钱的部分先丢」处理，而不是让排版从尾部省略掉最有用的房号：
+ * 1. 去掉空格；2. 去掉开头的括号（「(罗文)2教301」→「2教301」，校区每节课都一样，房号才是要找的）；
+ * 3. 仍然放不下才从头部截、保留尾部的楼层房号（「第二教学楼 B-301」→「…学楼B-301」）。
  */
 export function fitLoc(loc: string, lines: number, w: number): string {
   const aw = w - CARD_PAD_X * 2
@@ -180,23 +217,25 @@ export function fitLoc(loc: string, lines: number, w: number): string {
   const base = locBase(loc, aw)
   if (lines < 1 || linesFor(base, CARD_LOC_PX, aw) <= lines) return base
   if (linesFor(tight, CARD_LOC_PX, aw) <= lines) return tight
+  const bare = tight.replace(/^[(（[【][^)）\]】]*[)）\]】]/, '')
+  if (bare && bare !== tight && linesFor(bare, CARD_LOC_PX, aw) <= lines) return bare
   const chars = [...tight]
   let i = chars.length
   while (i > 1 && linesFor('…' + chars.slice(i - 1).join(''), CARD_LOC_PX, aw) <= lines) i--
   return '…' + chars.slice(i).join('')
 }
 
-/** 一张卡想完整显示需要的高度（含上下内缩）：课名最多两行，地点最多两行 */
+/** 一张卡想完整显示需要的高度（含上下内缩与右下角贴纸）：课名最多三行，地点最多两行 */
 export function cardNeed(w: number, name: string, loc?: string): number {
   const aw = w - CARD_PAD_X * 2
-  const nameLines = Math.min(2, linesFor(name, CARD_NAME_PX, aw))
-  const locLines = loc ? Math.min(2, linesFor(locBase(loc, aw), CARD_LOC_PX, aw)) : 0
-  return CARD_PAD * 2 + nameLines * CARD_LINE + (locLines > 0 ? CARD_LOC_GAP + locLines * CARD_LOC_LINE : 0) + CARD_INSET * 2
+  const nameLines = Math.min(CARD_NAME_MAX, linesFor(name, CARD_NAME_PX, aw))
+  const locLines = loc ? Math.min(CARD_LOC_MAX, linesFor(locBase(loc, aw), CARD_LOC_PX, aw)) : 0
+  return CARD_PAD * 2 + nameLines * CARD_LINE + (locLines > 0 ? CARD_LOC_GAP + locLines * CARD_LOC_LINE : 0) + CARD_INSET * 2 + stickerReserve(w)
 }
 
 /**
  * 每节的行高需求：取覆盖这一节的卡片里最高的需求；跨多节的课把需求（扣掉中间的课间）平摊到各节，
- * 所以连堂课的后半节不会被擑高。结果交给 buildAxis，在那里夹到 [AXIS_ROW_MIN, AXIS_ROW]。
+ * 所以连堂课的后半节不会被擑高。buildAxis 再取这些需求里的最大值统一定高——同一张表里所有节一样高。
  */
 export function rowHeights(grid: TimeSlot[], cards: { start: Minutes; end: Minutes; name: string; loc?: string }[], w: number): Map<number, number> {
   const rows = new Map<number, number>()
@@ -209,6 +248,10 @@ export function rowHeights(grid: TimeSlot[], cards: { start: Minutes; end: Minut
   return rows
 }
 
+/**
+ * 传进来的 h 已经把右下角留给贴纸的那一块扣掉了（见 WeekCard）。
+ * 课名优先：窄列里三行课名比两行地点有用得多，地点用剩下的行；地点一行都留不出时才把课名退一行。
+ */
 export function cardFit(h: number, w: number, name: string, loc?: string): CardFit | null {
   const aw = w - CARD_PAD_X * 2
   const needName = linesFor(name, CARD_NAME_PX, aw)
@@ -219,11 +262,12 @@ export function cardFit(h: number, w: number, name: string, loc?: string): CardF
   const budget = h - CARD_PAD * 2
   const maxName = Math.floor(budget / CARD_LINE)
   if (maxName < 1) return { nameLines: 1, locLines: 0, dense: true }
-  /* 有地点时先给地点留够位（最多两行），课名用剩下的；连一行地点都留不出时课名至少一行 */
-  const locWant = Math.min(needLoc, 2)
-  const nameCap = needLoc > 0 ? Math.max(1, Math.floor((budget - CARD_LOC_GAP - locWant * CARD_LOC_LINE) / CARD_LINE)) : maxName
-  const nameLines = Math.min(needName, nameCap)
-  const rest = budget - nameLines * CARD_LINE - CARD_LOC_GAP
-  const locLines = needLoc > 0 ? Math.min(needLoc, Math.max(0, Math.floor(rest / CARD_LOC_LINE))) : 0
+  let nameLines = Math.max(1, Math.min(needName, CARD_NAME_MAX, maxName))
+  const rest = () => Math.max(0, budget - nameLines * CARD_LINE - CARD_LOC_GAP)
+  let locLines = needLoc > 0 ? Math.min(needLoc, CARD_LOC_MAX, Math.floor(rest() / CARD_LOC_LINE)) : 0
+  if (needLoc > 0 && locLines === 0 && nameLines > 1) {
+    nameLines--
+    locLines = Math.min(needLoc, CARD_LOC_MAX, Math.floor(rest() / CARD_LOC_LINE))
+  }
   return { nameLines, locLines, dense: false }
 }

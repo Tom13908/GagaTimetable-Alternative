@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 尺寸必须落在系统的标准格位上：minWidth = 格数 × 70 − 30（1 格 40、2 格 110、3 格 180、4 格 250、5 格 320）。
+     原来的 150dp 卡在 2 格与 3 格之间，桌面按 (150+30)/70 向上取整就会占 3 格。 -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:initialLayout="@layout/widget_next"
     android:previewImage="@drawable/widget_preview_next"
-    android:minWidth="150dp"
-    android:minHeight="150dp"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:minResizeWidth="110dp"
+    android:minResizeHeight="40dp"
     android:targetCellWidth="2"
-    android:targetCellHeight="2"
+    android:targetCellHeight="1"
     android:resizeMode="horizontal|vertical"
     android:updatePeriodMillis="1800000"
     android:widgetCategory="home_screen" />

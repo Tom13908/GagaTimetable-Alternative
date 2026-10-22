@@ -1,5 +1,5 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core'
-import { planCalendar } from '../domain/calendar-plan'
+import { planCoursesForIcs } from '../domain/calendar-plan'
 import type { Snapshot } from '../domain/engine'
 import { ICS_MIME, buildIcs, icsFileName } from '../domain/ics'
 import { store } from './store'
@@ -13,6 +13,7 @@ interface IncomingFile {
 
 interface TtFilesPlugin {
   share(o: { text: string; name: string; mime: string }): Promise<void>
+  save(o: { text: string; name: string; mime: string }): Promise<{ path?: string; cancelled?: boolean }>
   takeIncoming(): Promise<IncomingFile>
   addListener(event: 'incoming', fn: (f: IncomingFile) => void): Promise<PluginListenerHandle>
 }
@@ -23,7 +24,7 @@ export const filesSupported = () => Capacitor.getPlatform() === 'android'
 
 /** 一个学期（当前或往期）的课表 .ics 文本；头部带学期名、开学日、周数与节次表 */
 export function icsOf(snap: Snapshot): { text: string; name: string } {
-  const events = planCalendar(snap, [], store.state.prefs, new Date()).filter((e) => e.kind === 'course')
+  const events = planCoursesForIcs(snap)
   const sem = snap.semester
   const text = buildIcs(events, {
     name: sem.name,
@@ -48,15 +49,37 @@ export async function shareIcs(snap: Snapshot | null = store.snapshot()): Promis
   return true
 }
 
+/** 保存一个学期的课表到本机；没有学期时返回 null，用户取消时返回 null */
+export async function saveIcs(snap: Snapshot | null = store.snapshot()): Promise<{ path: string } | null> {
+  const f = snap ? icsOf(snap) : null
+  if (!f) return null
+  return saveText(f, ICS_MIME)
+}
+
+/** 存成文件：安卓写进「下载」，浏览器里直接下载。取消或失败返回 null */
+export async function saveText(f: { text: string; name: string }, mime: string): Promise<{ path: string } | null> {
+  if (!filesSupported()) {
+    download(f, mime)
+    return { path: '本设备的Download文件夹' }
+  }
+  const r = await TtFiles.save({ text: f.text, name: f.name, mime })
+  if (r.cancelled) return null
+  return { path: r.path || '本机' }
+}
+
+function download(f: { text: string; name: string }, mime: string): void {
+  const blob = new Blob([f.text], { type: mime })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = f.name
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
 /** 任意文本文件走系统分享面板；浏览器里直接下载 */
 export async function shareText(f: { text: string; name: string }, mime: string): Promise<void> {
   if (!filesSupported()) {
-    const blob = new Blob([f.text], { type: mime })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = f.name
-    a.click()
-    URL.revokeObjectURL(a.href)
+    download(f, mime)
     return
   }
   await TtFiles.share({ text: f.text, name: f.name, mime })

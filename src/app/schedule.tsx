@@ -2,17 +2,20 @@ import React, { useMemo, useRef, useState } from 'react'
 import type { Semester } from '../domain/types'
 import { fmtMinutes } from '../domain/dates'
 import {
-  DURATION_STEP, MAX_DURATION, MAX_PERIODS, MIN_DURATION, MIN_PERIODS,
-  breakBefore, draftFromGrid, endOf, gridFromDraft, invalidPeriods,
-  resetEnd, setCount, setDuration, setEnd, setStart, type ScheduleDraft,
+  DURATION_STEP, MAX_DURATION, MIN_DURATION, MIN_SEGMENTS,
+  applyPlan, breakBefore, draftFromGrid, endOf, gridFromDraft, invalidPeriods,
+  naturalSegmentCount, planBreaks, planFromGrid, planSetCount, planSetDuration, planSetStart,
+  resetEnd, segmentCapacity, setEnd, setStart, spanText, type DayPlan, type ScheduleDraft,
 } from '../domain/schedule'
 import { store } from './store'
-import { Page, PrimaryButton, Sheet, SheetClose, SheetHead, Stepper, Switch, TimeWheels, TopBar } from './ui'
+import { Chips, Page, PrimaryButton, Sheet, SheetClose, SheetHead, Stepper, Switch, TimeSheet, TimeWheels, TopBar } from './ui'
 
-/* 作息时间：与原型 ScheduleScreen 逐屏一致 */
+/* 作息时间：上面按「一天分几段」铺骨架，下面逐节细调 */
 
-const gapText = (m: number) => (m >= 60 ? `${Math.floor(m / 60)} 小时${m % 60 ? ` ${m % 60} 分` : ''}` : `${m} 分`)
 const breakName = (start: number) => (start < 15 * 60 ? '午休' : start < 20 * 60 ? '晚饭' : '休息')
+
+/** 「一天分几段」的可选项，下标 0 对应 MIN_SEGMENTS */
+const SEGMENT_ITEMS = ['2 段', '3 段']
 
 type Pick = { i: number; which: 'start' | 'end' }
 
@@ -30,25 +33,56 @@ function ArrowIcon() {
 
 export function SchedulePage({ sem, onBack }: { sem: Semester; onBack: () => void }) {
   const [d, setD] = useState<ScheduleDraft>(() => draftFromGrid(sem.timeGrid))
+  const [segCount, setSegCount] = useState(() => naturalSegmentCount(sem.timeGrid))
   const [pick, setPick] = useState<Pick | null>(null)
+  const [pickSeg, setPickSeg] = useState<number | null>(null)
   const bad = useMemo(() => new Set(invalidPeriods(d)), [d])
   const n = d.starts.length
+  /* 段结构从当前课表反推，所以下面怎么改，上面立刻跟着变；上面一改，就按它重新铺一遍 */
+  const plan = useMemo(() => planFromGrid(gridFromDraft(d), segCount), [d, segCount])
+  const breaks = planBreaks(plan)
   const dirty = useMemo(() => JSON.stringify(gridFromDraft(d)) !== JSON.stringify(sem.timeGrid), [d, sem.timeGrid])
+  const usePlan = (next: DayPlan) => setD(applyPlan(d, next))
 
   return (
     <Page>
       <div className="flex-1 overflow-y-auto px-5 pb-[130px] [scrollbar-width:none]">
-        <TopBar title="作息时间" onBack={onBack} />
+        <TopBar title="作息时间" sub={`${n} 节`} onBack={onBack} />
 
         <div className="mt-6 rounded-[18px] bg-(--c-surface) px-4">
           <div className="flex items-center py-3">
-            <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">总节数</span>
-            <Stepper value={n} unit="节" min={MIN_PERIODS} max={MAX_PERIODS} onChange={(v) => setD(setCount(d, v))} />
+            <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">一天分几段</span>
+            <Chips items={SEGMENT_ITEMS} active={segCount - MIN_SEGMENTS} onPick={(i) => setSegCount(MIN_SEGMENTS + i)} />
+          </div>
+          <div className="pb-3 text-[12px] leading-[1.6] font-medium text-(--c-ink4)">
+            {plan.segments.map((s) => s.name).join(' · ')}
+            {breaks.length > 0 && `，段与段之间就是${breaks.map((b) => b.name).join('和')}`}
           </div>
           <div className="flex items-center border-t border-(--c-line2) py-3">
-            <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">标准时长</span>
-            <Stepper value={d.duration} unit="分" min={MIN_DURATION} max={MAX_DURATION} step={DURATION_STEP} onChange={(v) => setD(setDuration(d, v))} />
+            <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">每节时长</span>
+            <Stepper value={plan.duration} unit="分" min={MIN_DURATION} max={MAX_DURATION} step={DURATION_STEP} onChange={(v) => usePlan(planSetDuration(plan, v))} />
           </div>
+        </div>
+
+        <div className="mt-3 rounded-[18px] bg-(--c-surface) px-4">
+          <div className="flex items-center pt-3 pb-1 text-[11px] font-semibold text-(--c-ink5)">
+            <span className="w-[42px] flex-none" />
+            <span className="flex-1">每段第 1 节开始</span>
+            <span>节数</span>
+          </div>
+          {plan.segments.map((s, i) => (
+            <div key={s.name} className="flex items-center border-t border-(--c-line2) py-2.5">
+              <span className="w-[42px] flex-none text-[13px] font-bold text-(--c-ink)">{s.name}</span>
+              <button
+                onClick={() => setPickSeg(i)}
+                className="rounded-[10px] bg-(--c-surface2) px-3 py-1.5 text-[15px] font-bold tabular-nums text-(--c-ink) transition-transform duration-150 active:scale-[.96]"
+              >
+                {fmtMinutes(s.start)}
+              </button>
+              <span className="flex-1" />
+              <Stepper value={s.count} unit="节" min={0} max={segmentCapacity(plan, i)} onChange={(v) => usePlan(planSetCount(plan, i, v))} />
+            </div>
+          ))}
         </div>
 
         <div className="mt-5 flex items-baseline px-0.5">
@@ -75,7 +109,7 @@ export function SchedulePage({ sem, onBack }: { sem: Semester; onBack: () => voi
                     <span className={COL_IDX} />
                     <span className={`flex-1 border-t border-dashed ${big ? 'border-(--c-line)' : 'border-(--c-line2)'}`} />
                     <span className={`px-2 text-[11px] font-semibold tabular-nums ${gap < 0 ? 'text-(--c-danger)' : big ? 'text-(--c-ink4)' : 'text-(--c-ink5)'}`}>
-                      {gap < 0 ? `重叠 ${gapText(-gap)}` : `${big ? `${breakName(s)} ` : ''}${gapText(gap)}`}
+                      {gap < 0 ? `重叠 ${spanText(-gap)}` : `${big ? `${breakName(s)} ` : ''}${spanText(gap)}`}
                     </span>
                     <span className={`flex-1 border-t border-dashed ${big ? 'border-(--c-line)' : 'border-(--c-line2)'}`} />
                   </div>
@@ -121,6 +155,19 @@ export function SchedulePage({ sem, onBack }: { sem: Semester; onBack: () => voi
           pick={pick}
           onApply={(next) => setD(next)}
           onClose={() => setPick(null)}
+        />
+      )}
+
+      {pickSeg != null && (
+        <TimeSheet
+          value={fmtMinutes(plan.segments[pickSeg].start)}
+          title={`${plan.segments[pickSeg].name}第 1 节开始`}
+          step={5}
+          onPick={(v) => {
+            const [h, m] = v.split(':').map(Number)
+            usePlan(planSetStart(plan, pickSeg, h * 60 + m))
+          }}
+          onClose={() => setPickSeg(null)}
         />
       )}
     </Page>

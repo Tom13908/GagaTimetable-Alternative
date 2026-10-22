@@ -133,7 +133,9 @@ export function parseIcs(text: string, current: Semester): RuleOutput {
   const diags: Diagnostic[] = []
   const { events, semester } = parseIcsFile(text)
   if (events.length === 0) {
-    return { courses: [], diagnostics: [{ level: 'error', code: 'NO_EVENTS', message: '没有找到日历事件' }] }
+    /* 有 X-TT-SEMESTER 却一条事件都没有 = 空壳备份（导出的 bug 会产出这种文件）。
+       直接说「没有日历事件」会让人以为解析器坏了，得说清是文件本身没有课程。 */
+    return { courses: [], diagnostics: [{ level: 'error', code: 'NO_EVENTS', message: semester ? '这个文件里只有学期信息，没有课程' : '没有找到日历事件' }] }
   }
   const sem: Semester = semester ? { ...current, ...semester } : current
   // 相同 课名|星期|节次 的事件合并周次
@@ -163,10 +165,14 @@ export function parseIcs(text: string, current: Semester): RuleOutput {
     }
     const teacherPhone = extractPhone(ev.description)
     const teacher = ev.description?.split('\n').find((l) => l && l !== ev.location && !extractPhone(l))?.trim() || undefined
-    const key = `${ev.summary}|${weekday}|${pr.start}-${pr.end}`
+    /* 导出器给调课/停课/请假的单次事件加了后缀（如「高等数学（调课）」），
+       导入时剥掉，否则备份恢复会多出一门名字带后缀的课。与 summarize() 用的是同一组后缀。 */
+    const name = ev.summary.replace(/（(调课|停课|请假)）$/, '')
+    /* 地点进 key：单双周换教室的课不会被并成一条（否则地点只剩第一个） */
+    const key = `${name}|${weekday}|${pr.start}-${pr.end}|${ev.location ?? ''}`
     const ex = byKey.get(key)
     if (ex) weeks.forEach((w) => ex.weekSet.add(w))
-    else byKey.set(key, { name: ev.summary, teacher, teacherPhone, location: ev.location, weekday, startPeriod: pr.start, endPeriod: pr.end, weeks: '', color: ev.color, weekSet: new Set(weeks) })
+    else byKey.set(key, { name, teacher, teacherPhone, location: ev.location, weekday, startPeriod: pr.start, endPeriod: pr.end, weeks: '', color: ev.color, weekSet: new Set(weeks) })
   }
 
   const courses: RuleCourse[] = [...byKey.values()].map(({ weekSet, ...rc }) => ({

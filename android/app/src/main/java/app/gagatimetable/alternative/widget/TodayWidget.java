@@ -1,4 +1,4 @@
-package app.timetable.widget;
+package app.gagatimetable.alternative.widget;
 
 public class TodayWidget extends BaseWidget {
     @Override

@@ -26,7 +26,10 @@ export interface RuleOutput {
   semester?: Partial<Pick<Semester, 'name' | 'startDate' | 'totalWeeks'>>
 }
 
-const PHONE_RE = /(?:\+?86[- ]?)?1[3-9]\d(?:[ \-]?\d){8}/
+/* 手机号（可带 +86）或座机（区号 3~4 位 + 7~8 位）。
+   座机是后加的：ICS 往返时教师栏里的「010-12345678」原来认不出来，
+   那行会被当成教师名，号码反而丢了。 */
+const PHONE_RE = /(?:(?:\+?86[- ]?)?1[3-9]\d(?:[ \-]?\d){8})|(?:0\d{2,3}[ \-]?\d{7,8})/
 
 /** 从任意文本里取出第一个大陆手机号，去 86 前缀与分隔符 */
 export function extractPhone(s: unknown): string | undefined {

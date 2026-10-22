@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Debug 与 release 同包名（app.gagatimetable.alternative），签名不同装不上同一台机器；显示名保持一致 -->
+    <string name="app_name">嘎嘎课程表</string>
+</resources>

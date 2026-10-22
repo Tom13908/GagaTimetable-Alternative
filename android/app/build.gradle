@@ -1,7 +1,7 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "app.timetable"
+    namespace = "app.gagatimetable.alternative"
     compileSdk = rootProject.ext.compileSdkVersion
 
     signingConfigs {
@@ -15,11 +15,11 @@ android {
     }
 
     defaultConfig {
-        applicationId "app.timetable"
+        applicationId "app.gagatimetable.alternative"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode System.getenv("VERSION_CODE")?.toInteger() ?: 71
-        versionName System.getenv("VERSION_NAME") ?: "1.4.78"
+        versionCode System.getenv("VERSION_CODE")?.toInteger() ?: 1
+        versionName System.getenv("VERSION_NAME") ?: "0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -32,6 +32,13 @@ android {
             signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        /* 包名 = 项目标识 GagaTimetable-Alternative（app.gagatimetable.alternative），
+           与上游 app.timetable 是两个不同的 App，可并存。
+           Beta 构建不加包名后缀，只留版本号后缀 -beta 表示这是测试线。
+           代价：同一台机器上 debug 与 release 同包名（签名不同），要装 CI 出的正式包得先卸载这个。 */
+        debug {
+            versionNameSuffix "-beta"
         }
     }
 }

@@ -14,7 +14,7 @@ import { edu, nativeEdu, type EduNav } from './edu-browser'
 import { shareText } from './files'
 import { EDU_RULE, keepEduSession, setEduBrowserOpen, type EduSyncSource } from './edu-sync'
 import { haptic, nativeToast } from './widgets'
-import { ActionSheet, BackButton, FADE, Loader, Page, PrimaryButton, Row, SLIDE, Sheet, SheetClose, SheetHead, TopBar, dockStyle, tint } from './ui'
+import { ActionSheet, BackButton, FADE, Loader, Page, PrimaryButton, Row, SLIDE, Sheet, SheetClose, SheetHead, TopBar, dockStyle, inkMix, tint } from './ui'
 
 /* 教务导入：选学校 → 内置浏览器里自己登录、打开课表页 → 读当前页 → 预览（复用 ImportRunPage）。
    浏览器会话按学校独立，默认离开时清掉，开了保持登录的学校才保留；只在用户点「导入」后读取当前页面 / 同源课表接口。 */
@@ -521,10 +521,10 @@ export function EduBrowserPage({ school, active, onBack, onImport, onFail }: {
             ref={pill}
             onClick={onImportTap}
             disabled={!can || busy}
-            className={`pointer-events-auto flex h-[36px] items-center gap-1.5 rounded-full px-4 text-[13px] font-bold transition-transform duration-150 active:scale-[.97] ${can ? 'text-(--c-accent)' : 'text-(--c-ink3)'}`}
-            style={dockStyle}
+            className={`pointer-events-auto flex h-[42px] items-center gap-2 rounded-full px-5 text-[15px] font-bold transition-transform duration-150 active:scale-[.97] ${can ? 'edu-cta' : 'text-(--c-ink3)'}`}
+            style={can ? undefined : dockStyle}
           >
-            {busy && <Loader size={13} />}
+            {busy && <Loader size={15} />}
             {label}
           </button>
         </div>
@@ -585,7 +585,7 @@ export function PreviewGrid({ courses, periods }: { courses: NormalizedCourse[];
                     top: ((r.startPeriod - 1) / n) * GRID_H,
                     height: Math.max(6, ((r.endPeriod - r.startPeriod + 1) / n) * GRID_H - 1),
                     background: tint(c.course.color, 14),
-                    color: `color-mix(in srgb, ${c.course.color} 88%, var(--c-ink-mix))`,
+                    color: inkMix(c.course.color, 88),
                   }}
                 >
                   {c.course.name}

@@ -2,11 +2,11 @@ import { SYSTEM_LABEL, scrubUrl, type EduSystemId } from './systems'
 
 /* 未识别页的两条出口：检查新版本、去 GitHub 反馈。反馈正文只带脱敏地址、系统猜测和版本号 */
 
-export const REPO = 'shuakami/timetable'
+export const REPO = 'Tom13908/GagaTimetable-Alternative'
 export const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`
 export const RELEASES_URL = `https://github.com/${REPO}/releases/latest`
 
-/** "v1.4.55" → [1, 4, 55]；不像版本号的返回 null */
+/** "v0.1.2" → [0, 1, 2]；不像版本号的返回 null */
 export function parseVersion(v: string): number[] | null {
   const m = /^v?(\d+(?:\.\d+)*)/.exec(v.trim())
   if (!m) return null
@@ -39,7 +39,7 @@ export function issueUrl(info: FeedbackInfo): string {
     `系统猜测：${info.system ? SYSTEM_LABEL[info.system] : '未知'}`,
     `版本：${info.version || '未知'}`,
     '',
-    '（可补充：页面截图、课表结构说明；内置浏览器右上「更多 → 导出页面调试包」得到的 .html 文件请发到 Shuakami@sdjz.wiki）',
+    '（可补充：页面截图、课表结构说明；内置浏览器右上「更多 → 导出页面调试包」得到的 .html 文件可直接拖进这条 issue）',
   ].join('\n')
   const q = new URLSearchParams({ title: `教务导入未识别：${page}`, body, labels: 'edu-import' })
   return `https://github.com/${REPO}/issues/new?${q.toString()}`

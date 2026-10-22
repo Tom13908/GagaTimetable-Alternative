@@ -58,7 +58,7 @@ export async function runRule(rule: RuleManifest, input: RuleInput, sem: Semeste
       if (!input.bytes) {
         return { courses: [], diagnostics: [{ level: 'error', code: 'NO_FILE', message: 'Excel 导入需要选择 .xlsx 文件' }] }
       }
-      return parseXlsx(input.bytes, rule.csv ?? DEFAULT_CSV_MAPPING)
+      return await parseXlsx(input.bytes, rule.csv ?? DEFAULT_CSV_MAPPING)
     }
     case 'ics':
       return parseIcs(input.text, sem)

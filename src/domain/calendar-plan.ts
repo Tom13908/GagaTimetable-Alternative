@@ -1,4 +1,4 @@
-import type { LocalDate, Minutes, Prefs, Task } from './types'
+import { defaultPrefs, type LocalDate, type Minutes, type Prefs, type Task } from './types'
 import { addDays, atMinutes, dateOf, diffDays, fromDate, weekdayOf } from './dates'
 import { occurrencesOn, type Snapshot } from './engine'
 
@@ -317,15 +317,22 @@ function planTasks(tasks: Task[], courseName: Map<string, string>, prefs: Prefs,
   return out
 }
 
-/** 日历里应该有的全部事件 */
+/** 日历里应该有的全部事件。两个总开关关着的类别不进日历（关掉后下次同步会把这些事件删掉） */
 export function planCalendar(snap: Snapshot | null, tasks: Task[], prefs: Prefs, now: Date): DesiredEvent[] {
   const tz = localTz()
   const today = fromDate(now)
   const courseName = new Map(snap?.courses.map((c) => [c.id, c.name]) ?? [])
   const out: DesiredEvent[] = []
-  if (snap) out.push(...planCourses(snap, prefs, tz), ...planWeeks(snap, tz))
-  out.push(...planTasks(tasks, courseName, prefs, today, tz))
+  if (snap && prefs.classRemind) out.push(...planCourses(snap, prefs, tz), ...planWeeks(snap, tz))
+  if (prefs.taskRemind) out.push(...planTasks(tasks, courseName, prefs, today, tz))
   return out
+}
+
+/** 导出 .ics 用的课程事件。**不受「上课提醒」总开关影响**——
+    导出/备份/分享课表与「要不要写进系统日历」是两件事，用户把提醒关着也照样得能备份。
+    （原来 files.ts 直接调 planCalendar 并传入真实 prefs，两个开关默认都是关的 → 导出的文件只有文件头。） */
+export function planCoursesForIcs(snap: Snapshot): DesiredEvent[] {
+  return planCourses(snap, { ...defaultPrefs(), classRemind: true }, localTz())
 }
 
 export interface CalendarSummary {

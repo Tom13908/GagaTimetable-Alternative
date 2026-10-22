@@ -1,4 +1,4 @@
-package app.timetable;
+package app.gagatimetable.alternative;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -29,12 +29,12 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-import app.timetable.widget.BaseWidget;
-import app.timetable.widget.NextWidget;
-import app.timetable.widget.TodayWidget;
-import app.timetable.widget.TwoDaysWidget;
-import app.timetable.widget.WeekWidget;
-import app.timetable.widget.WidgetStore;
+import app.gagatimetable.alternative.widget.BaseWidget;
+import app.gagatimetable.alternative.widget.NextWidget;
+import app.gagatimetable.alternative.widget.TodayWidget;
+import app.gagatimetable.alternative.widget.TwoDaysWidget;
+import app.gagatimetable.alternative.widget.WeekWidget;
+import app.gagatimetable.alternative.widget.WidgetStore;
 
 /** WebView 与桌面小组件之间的桥：写快照、触发重画、请求添加到桌面。 */
 @CapacitorPlugin(name = "WidgetBridge")

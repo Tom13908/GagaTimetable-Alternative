@@ -124,6 +124,10 @@ export type WidgetStyle = (typeof WIDGET_STYLES)[number]
 
 /** 提醒与小组件偏好。提醒全部由系统日历发出，这里只是写进日历的提醒模板 */
 export interface Prefs {
+  /** 上课提醒总开关。关着就不把课写进系统日历，也不申请日历权限 */
+  classRemind: boolean
+  /** 作业提醒总开关（含考试）。关着就不把作业、考试写进系统日历 */
+  taskRemind: boolean
   classLead: Minutes // 课前多久提醒
   earlyLead: Minutes // 早课（08:30 前开始）再加一条更早的提醒，0 = 不加
   taskLeads: Minutes[] // 作业截止前多久（可多个）；没写时刻的作业按当天 23:00 截止
@@ -147,6 +151,8 @@ export const EXAM_DAYS: number[] = [7, 3, 1, 0]
 
 export function defaultPrefs(): Prefs {
   return {
+    classRemind: false,
+    taskRemind: false,
     classLead: 15,
     earlyLead: 30,
     taskLeads: [24 * 60, 2 * 60],

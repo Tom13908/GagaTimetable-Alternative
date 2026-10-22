@@ -3,7 +3,7 @@ import type { Semester } from '../types'
 import { defaultPrefs } from '../types'
 import type { Snapshot } from '../engine'
 import { weeksToMask } from '../weeks'
-import { planCalendar } from '../calendar-plan'
+import { planCalendar, planCoursesForIcs } from '../calendar-plan'
 import { buildIcs, icsFileName } from '../ics'
 import { parseIcs } from '../importers/ics'
 
@@ -32,7 +32,7 @@ const snap: Snapshot = {
 const now = new Date('2026-09-01T12:00:00')
 
 function exportIcs() {
-  const events = planCalendar(snap, [], defaultPrefs(), now).filter((e) => e.kind === 'course')
+  const events = planCalendar(snap, [], { ...defaultPrefs(), classRemind: true, taskRemind: true }, now).filter((e) => e.kind === 'course')
   return buildIcs(events, {
     name: sem.name,
     semester: { name: sem.name, startDate: sem.startDate, totalWeeks: sem.totalWeeks, timeGrid: sem.timeGrid },
@@ -77,5 +77,22 @@ describe('ICS 导出', () => {
     expect(icsFileName('2026 秋季')).toBe('2026 秋季.ics')
     expect(icsFileName('a/b:c')).toBe('a b c.ics')
     expect(icsFileName('  ')).toBe('课表.ics')
+  })
+
+  /* 回归：提醒总开关默认两个都关，导出曾经直接传真实 prefs → 文件只有文件头、零个 VEVENT */
+  it('两个提醒开关都关着时，导出照样有课程', () => {
+    expect(planCoursesForIcs(snap).length).toBeGreaterThan(0)
+    expect(planCalendar(snap, [], defaultPrefs(), now).filter((e) => e.kind === 'course')).toHaveLength(0)
+    expect(buildIcs(planCoursesForIcs(snap), {
+      name: sem.name, semester: { name: sem.name, startDate: sem.startDate, totalWeeks: sem.totalWeeks, timeGrid: sem.timeGrid }, now,
+    })).toContain('BEGIN:VEVENT')
+  })
+
+  it('只有文件头、没有事件的文件：说明是「只有学期信息」，不是「找不到日历事件」', () => {
+    const shell = exportIcs().replace(/BEGIN:VEVENT[\s\S]*?END:VEVENT\r\n/g, '')
+    expect(shell).not.toContain('BEGIN:VEVENT')
+    const out = parseIcs(shell, sem)
+    expect(out.diagnostics.map((d) => d.message)).toContain('这个文件里只有学期信息，没有课程')
+    expect(out.diagnostics.map((d) => d.message)).not.toContain('没有找到日历事件')
   })
 })

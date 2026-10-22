@@ -1,4 +1,4 @@
-package app.timetable;
+package app.gagatimetable.alternative;
 
 import android.annotation.SuppressLint;
 import android.content.Context;

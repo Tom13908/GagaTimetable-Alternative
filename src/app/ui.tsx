@@ -21,8 +21,36 @@ export const dockStyle: React.CSSProperties = {
   boxShadow: 'var(--c-dock-shadow)',
 }
 
+/* color-mix() 要 Chrome 111 以上；小米平板 4 的 WebView 是 104，整条声明会被丢掉——
+   课程色块、彩色课名这些全都会退成透明和默认黑字。所以这里自己按 sRGB 算。
+   与不透明底色（--c-surface）混合 == 同色带 alpha 叠在底色上，两种写法结果一致。 */
+function rgbOf(color: string): [number, number, number] | null {
+  const s = color.trim()
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s)
+  if (!m) return null
+  const h = m[1]
+  const n = h.length === 3
+    ? [parseInt(h[0] + h[0], 16), parseInt(h[1] + h[1], 16), parseInt(h[2] + h[2], 16)]
+    : [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+  return n as [number, number, number]
+}
+
+/** 课程色按 pct% 混到卡片底色上（等价 color-mix(in srgb, color pct%, var(--c-surface))） */
 export function tint(color: string, pct: number) {
-  return `color-mix(in srgb, ${color} ${pct}%, var(--c-surface))`
+  const c = rgbOf(color)
+  if (!c) return `color-mix(in srgb, ${color} ${pct}%, var(--c-surface))`
+  const a = Math.round(pct) / 100
+  return `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`
+}
+
+/** 课程色按 pct% 混进文字色（--c-ink-mix：浅色是黑，深色是白） */
+export function inkMix(color: string, pct: number) {
+  const c = rgbOf(color)
+  if (!c) return `color-mix(in srgb, ${color} ${pct}%, var(--c-ink-mix))`
+  const base = document.documentElement.dataset.theme ? 255 : 0
+  const k = Math.max(0, Math.min(100, pct)) / 100
+  const ch = (v: number) => Math.round(v * k + base * (1 - k))
+  return `rgb(${ch(c[0])}, ${ch(c[1])}, ${ch(c[2])})`
 }
 
 export const WD = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -45,7 +73,16 @@ export function Nav({ active, onTab, hidden }: { active: number; onTab: (i: numb
       transition={{ type: 'spring', bounce: 0.18, duration: 0.45 }}
       className="pointer-events-none absolute inset-x-0 bottom-[max(24px,env(safe-area-inset-bottom))] flex justify-center px-4"
     >
-      <div className="pointer-events-auto flex w-[92%] items-center justify-between rounded-full p-[5px]" style={dockStyle}>
+      <div className="pointer-events-auto relative flex w-[92%] max-w-[400px] items-center justify-between rounded-full p-[5px]" style={dockStyle}>
+        {/* 选中底片整块一个元素，靠 translateX 百分比滑过去。
+            以前是每个按钮里放一个 layoutId 相同的 <motion.i>，切页时它在挂载/卸载之间做共享布局动画，
+            motion 每帧都要量一遍视口盒（真机采样：一次切页 2888 次 getBoundingClientRect、约 900ms）。
+            现在也不再用 motion 的弹簧：真机上这条弹簧要跑 0.6s，每帧都把带阴影的整个 dock 重画一次，
+            切页 jank 帧里有一半是它。交给 CSS transition，动画落在合成线程上，主线程不参与。 */}
+        <i
+          className="pointer-events-none absolute inset-y-[5px] left-[5px] rounded-full bg-(--c-accent-soft) transition-[transform,opacity] duration-300 ease-out will-change-transform"
+          style={{ width: 'calc((100% - 10px) / 4)', transform: `translateX(${active * 100}%)`, opacity: hidden ? 0 : 1 }}
+        />
         {NAV_ITEMS.map(([ic, label], i) => {
           const on = i === active
           return (
@@ -54,13 +91,6 @@ export function Nav({ active, onTab, hidden }: { active: number; onTab: (i: numb
               onClick={() => onTab(i)}
               className="relative flex flex-1 flex-col items-center gap-[2px] px-1 pt-[6px] pb-[5px] transition-transform duration-150 active:scale-[.94]"
             >
-              {on && (
-                <motion.i
-                  layoutId="nav-indicator"
-                  className="absolute inset-x-[1px] inset-y-0 rounded-full bg-(--c-accent-soft)"
-                  transition={{ type: 'spring', bounce: 0.2, duration: 0.6 }}
-                />
-              )}
               <svg viewBox="0 0 24 24" fill="none" stroke={on ? 'var(--c-accent)' : 'var(--c-ink)'} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="relative z-10 h-[19px] w-[19px] transition-colors duration-200">{ic}</svg>
               <span className={`relative z-10 text-[9.5px] font-bold transition-colors duration-200 ${on ? 'text-(--c-accent)' : 'text-(--c-ink)'}`}>{label}</span>
             </button>
@@ -189,10 +219,11 @@ export function TopVeil({ bleed = 0, feather = 44, progress = 1 }: {
   )
 }
 
-/** 底栏后面的渐变遮挡：底色向上淡出，再叠一点轻微的模糊过渡 */
+/** 底栏后面的渐变遮挡：底色向上淡出，再叠一点轻微的模糊过渡。
+ *  原来叠三层（1/2/4px）做渐进模糊，真机实测每多一层 backdrop-filter 就多一次整屏背景重采样：
+ *  三层 → 一层，切页 p50 从 28–36ms 降到 19–28ms、jank 从 52–60% 降到 32–46%，而画面上看不出差别
+ *  （前两层本来就压在几乎不透明的渐变底下）。所以只留面积最大、最外缘的 4px 那层。 */
 const BOTTOM_BANDS: [number, number, number][] = [
-  [1, 60, 100],
-  [2, 40, 80],
   [4, 18, 58],
 ]
 
@@ -248,7 +279,7 @@ export function StickyHead({ children, bleed = 0, feather, className = '' }: {
     return () => ro.disconnect()
   }, [host])
   const head = (
-    <div ref={box} className={`absolute inset-x-0 top-0 z-[30] isolate pt-[max(52px,calc(env(safe-area-inset-top)+22px))] pb-3 ${className}`}>
+    <div ref={box} className={`head-pad absolute inset-x-0 top-0 z-[30] isolate pt-[max(52px,calc(env(safe-area-inset-top)+22px))] pb-3 ${className}`}>
       <TopVeil bleed={bleed} feather={feather} progress={veil} />
       {children}
     </div>
@@ -553,8 +584,8 @@ export function WeekBand({ tone, title, meta }: { tone: 'gray' | 'amber'; title:
   return (
     <div className="flex items-center gap-2 rounded-[8px] px-2.5 py-[6px]" style={{ background: tint(c, 12) }}>
       <i className="h-[14px] w-[3px] flex-none rounded-full" style={{ background: c }} />
-      <span className="text-[11.5px] font-bold" style={{ color: `color-mix(in srgb, ${c} 80%, var(--c-ink-mix))` }}>{title}</span>
-      <span className="ml-auto text-[10.5px] font-semibold tabular-nums" style={{ color: `color-mix(in srgb, ${c} 65%, var(--c-ink-mix))` }}>{meta}</span>
+      <span className="text-[11.5px] font-bold" style={{ color: inkMix(c, 80) }}>{title}</span>
+      <span className="ml-auto text-[10.5px] font-semibold tabular-nums" style={{ color: inkMix(c, 65) }}>{meta}</span>
     </div>
   )
 }
@@ -570,7 +601,7 @@ export function GhostEvent({ name, color, top, h, note = '停课' }: {
   return (
     <div
       className="absolute inset-x-0 overflow-hidden rounded-[9px] border-[1.5px] border-dashed px-1 py-1.5 text-[9.5px] leading-[1.35] font-bold"
-      style={{ top, height: h, borderColor: tint(color, 45), color: `color-mix(in srgb, ${color} 70%, var(--c-ink-mix))` }}
+      style={{ top, height: h, borderColor: tint(color, 45), color: inkMix(color, 70) }}
     >
       <span className="opacity-70">{name}</span>
       <div className="mt-0.5 text-[8.5px] leading-[1.3] font-semibold opacity-60">{note}</div>
@@ -823,14 +854,27 @@ export interface Ghost {
 const MENU_SPRING = { type: 'spring', bounce: 0.28, duration: 0.42 } as const
 const MENU_OUT = { type: 'tween', ease: [0.32, 0.72, 0, 1], duration: 0.18 } as const
 
+/**
+ * 内容区的实际尺寸。菜单、浮层一律按它来 clamp：宽屏上内容只有中间那一条，
+ * 拿 window.innerWidth 去算会把菜单排到屏幕边上、甚至排到内容区外面。
+ */
+function shellBox(): { w: number; h: number } {
+  const r = document.querySelector('[data-shell]')?.getBoundingClientRect()
+  return {
+    w: r && r.width > 0 ? r.width : Math.min(window.innerWidth, 430),
+    h: r && r.height > 0 ? r.height : window.innerHeight,
+  }
+}
+
 /* 长按后的浮层菜单：卡片副本抬到遮罩上，菜单从卡片一侧弹出；dismissRef 给外部走同一条退场后再 onClose */
 export function Popover({ anchor, ghost, onClose, dismissRef, children }: { anchor: Rect; ghost?: Ghost; onClose: () => void; dismissRef?: React.MutableRefObject<(() => void) | null>; children: React.ReactNode }) {
   const [open, setOpen] = useState(true)
   const close = useCallback(() => setOpen(false), [])
   if (dismissRef) dismissRef.current = close
   useEffect(() => () => { if (dismissRef && dismissRef.current === close) dismissRef.current = null }, [dismissRef, close])
-  const shellW = Math.min(window.innerWidth, 430)
-  const shellH = window.innerHeight
+  const shell = shellBox()
+  const shellW = shell.w
+  const shellH = shell.h
   const below = anchor.y + anchor.h + 10
   const originTop = shellH - below > 300
   const ghostHost = useRef<HTMLDivElement>(null)
@@ -1499,6 +1543,7 @@ export const ICON = {
   image: <g><rect x="3.5" y="4.5" width="17" height="15" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="m4 17 5-5 4 4 3-3 4.5 4.5" /></g>,
   camera: <g><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6H8l1.2-2h5.6L16 6h1.5A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z" /><circle cx="12" cy="12.5" r="3.2" /></g>,
   calendar: <g><rect x="3.5" y="5" width="17" height="15" rx="3" /><path d="M3.5 10h17M8 3v4M16 3v4" /></g>,
+  user: <g><circle cx="12" cy="8.6" r="3.4" /><path d="M5.5 19.5c0-3.3 2.9-5.4 6.5-5.4s6.5 2.1 6.5 5.4" /></g>,
   moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />,
   flag: <path d="M5 21V4.5M5 4.5h11l-1.5 4L18 12.5H5" />,
   note: <g><rect x="4.5" y="3.5" width="15" height="17" rx="3" /><path d="M8.5 9h7M8.5 13h7M8.5 17h4" /></g>,

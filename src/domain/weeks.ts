@@ -1,5 +1,5 @@
 /* 周次表达式 → 位掩码。bit(n-1) 表示第 n 周。
-   支持："1-16" "1-8,10,12-16" "2-16双" "1-15(单)" "3" "1-16周" 等常见写法。 */
+   支持："1-16" "1-8,10,12-16" "2-16双" "1-15(单)" "3" "1-16周" "第7周" 等常见写法。 */
 
 export function weeksToMask(weeks: number[]): bigint {
   let m = 0n
@@ -31,7 +31,8 @@ export function parseWeekExpr(raw: string): { mask: bigint; error?: string } {
   let parity: 'odd' | 'even' | null = null
   if (/单/.test(s)) parity = 'odd'
   if (/双/.test(s)) parity = 'even'
-  s = s.replace(/[()（）]/g, '').replace(/[单双周节]/g, '').trim()
+  // 「第」也要去掉：正方把单周课写成「第7周」，漏掉它整段会被判为无法解析，课直接丢掉
+  s = s.replace(/[()（）]/g, '').replace(/[第单双周节]/g, '').trim()
   if (!s) return { mask: 0n, error: 'EMPTY_WEEK_EXPR' }
   let mask = 0n
   for (const part of s.split(',')) {

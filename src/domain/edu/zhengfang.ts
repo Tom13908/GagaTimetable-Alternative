@@ -109,7 +109,8 @@ export function parseZfKbList(input: unknown): RuleOutput {
     }
     const { weeks, error } = zcdToWeeks(clean(k.zcd))
     if (!weeks) {
-      diagnostics.push({ level: 'warn', code: 'BAD_WEEKS', message: `「${name}」周次无法识别：${clean(k.zcd)}`, at: { row } })
+      // 这条课会被丢掉，按错误级报出来；warn 级不会出现在导入预览上，就成了无声漏课
+      diagnostics.push({ level: 'error', code: 'BAD_WEEKS', message: `「${name}」周次无法识别：${clean(k.zcd)}`, at: { row } })
       return
     }
     if (error) diagnostics.push({ level: 'info', code: 'WEEKS_PARTIAL', message: `「${name}」周次部分无法识别：${clean(k.zcd)}`, at: { row } })

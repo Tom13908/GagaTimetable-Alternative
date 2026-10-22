@@ -1,4 +1,4 @@
-package app.timetable;
+package app.gagatimetable.alternative;
 
 import android.content.Intent;
 import android.content.res.Configuration;
@@ -25,6 +25,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(TtCalendar.class);
         registerPlugin(TtFiles.class);
         registerPlugin(TtEdu.class);
+        registerPlugin(TtZf.class);
         super.onCreate(savedInstanceState);
         TtFiles.handleIntent(this, getIntent());
         ThemeApply.applySaved(this, getBridge().getWebView());

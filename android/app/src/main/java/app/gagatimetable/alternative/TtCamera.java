@@ -1,4 +1,4 @@
-package app.timetable;
+package app.gagatimetable.alternative;
 
 import android.Manifest;
 import android.content.ContentResolver;
@@ -107,8 +107,9 @@ public class TtCamera extends Plugin {
     public void load() {
         io = Executors.newSingleThreadExecutor();
         analysis = Executors.newSingleThreadExecutor();
-        // 提前初始化 CameraX，进相机页时少等几百毫秒
-        ProcessCameraProvider.getInstance(getContext());
+        // 原来在这里就 ProcessCameraProvider.getInstance()，而 registerPlugin() 会立刻调 load()，
+        // 于是每次冷启动的主线程都要付一次 CameraX 预初始化；绝大部分用户这次不会开相机。
+        // 改到真正 start() 时才初始化（那里本来就有等待）。
     }
 
     /* ---------------- 权限 ---------------- */

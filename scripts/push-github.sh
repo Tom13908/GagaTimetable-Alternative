@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 用 GitHub REST API 建私有仓库并把当前目录以单个提交推到 main。
-# 不用 gh CLI。提交人固定。token 只从 GH_TOKEN 环境变量读取。
+# 不用 gh CLI。token 只从 GH_TOKEN 环境变量读取。
+# 提交人默认取本机 git config，可用 GIT_NAME / GIT_EMAIL 覆盖。
 #
 #   GH_TOKEN=ghp_xxx scripts/push-github.sh <repo-name> ["commit message"]
 set -euo pipefail
@@ -8,8 +9,10 @@ set -euo pipefail
 REPO="${1:?repo name}"
 MSG="${2:-Initial commit}"
 : "${GH_TOKEN:?GH_TOKEN 未设置}"
-NAME="shuakami"
-EMAIL="shuakami@sdjz.wiki"
+NAME="${GIT_NAME:-$(git config --global user.name)}"
+EMAIL="${GIT_EMAIL:-$(git config --global user.email)}"
+: "${NAME:?GIT_NAME 未设置，且本机没有 git config user.name}"
+: "${EMAIL:?GIT_EMAIL 未设置，且本机没有 git config user.email}"
 API="https://api.github.com"
 
 auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")

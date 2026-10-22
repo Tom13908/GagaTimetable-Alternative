@@ -1,4 +1,4 @@
-package app.timetable.widget;
+package app.gagatimetable.alternative.widget;
 
 import android.content.Context;
 import android.content.res.Configuration;
@@ -6,7 +6,7 @@ import android.content.SharedPreferences;
 
 import org.json.JSONArray;
 
-import app.timetable.R;
+import app.gagatimetable.alternative.R;
 import org.json.JSONException;
 import org.json.JSONObject;
 

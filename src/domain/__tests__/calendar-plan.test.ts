@@ -31,7 +31,8 @@ function snap(partial: Partial<Snapshot> = {}): Snapshot {
 const course = { id: 'c1', semesterId: 's1', name: '高等数学', teacher: '王立群', color: '#4F5BD5', identityKey: 'k', hidden: false, source: 'import' as const }
 const weekly = { id: 'r1', courseId: 'c1', weekday: 1 as const, startPeriod: 1, endPeriod: 2, weeksMask: weeksToMask([1, 2, 3, 4, 5, 6, 7, 8]), location: '教三 302' }
 const now = new Date('2026-09-01T12:00:00')
-const prefs = defaultPrefs()
+/** 默认两个总开关都是关的，这里按「都开着」来测内容；开关本身另有一组用例 */
+const prefs = { ...defaultPrefs(), classRemind: true, taskRemind: true }
 
 describe('课程', () => {
   it('每周同一时间合成一条重复事件', () => {
@@ -174,6 +175,65 @@ describe('作业与考试', () => {
     expect(e.event.end! - e.event.start).toBe(2 * 60 * 60000)
     // 7/3/1 天前早 8 点 + 当天早 8 点
     expect(e.reminders).toEqual([360, 1800, 4680, 10440])
+  })
+})
+
+describe('首节课额外提醒的判定', () => {
+  /* 作息：08:00 与 08:20 两节都早于 08:30，下午那节 14:00 开始 */
+  const tight: Semester = {
+    ...sem,
+    timeGrid: [
+      { index: 1, start: 480, end: 495 },
+      { index: 2, start: 500, end: 515 },
+      { index: 3, start: 840, end: 885 },
+    ],
+  }
+  const c2 = { ...course, id: 'c2', name: '线性代数' }
+  const c3 = { ...course, id: 'c3', name: '大学物理' }
+  const r1 = { ...weekly, id: 'ra', startPeriod: 1, endPeriod: 1, weeksMask: weeksToMask([1]) }
+  const r2 = { ...weekly, id: 'rb', courseId: 'c2', startPeriod: 2, endPeriod: 2, weeksMask: weeksToMask([1]) }
+  const r3 = { ...weekly, id: 'rc', courseId: 'c3', startPeriod: 3, endPeriod: 3, weeksMask: weeksToMask([1]) }
+  /* 同一天排了 08:00 / 08:20 / 14:00 三节课 */
+  const days = planCalendar(
+    { semester: tight, courses: [course, c2, c3], rules: [r1, r2, r3], overrides: [], entries: [] },
+    [],
+    prefs,
+    now,
+  )
+  const reminders = new Map(days.filter((e) => e.kind === 'course').map((e) => [e.event.title, e.reminders]))
+
+  it('按开始时间判，不是「当天第一节」：08:30 前开始的都算', () => {
+    expect(reminders.get('高等数学')).toEqual([15, 30])
+    expect(reminders.get('线性代数')).toEqual([15, 30]) // 同一天第二节，08:20 开始，同样命中
+  })
+
+  it('下午段的第一节不命中：14:00 开始只有课前提醒', () => {
+    expect(reminders.get('大学物理')).toEqual([15])
+  })
+})
+
+describe('总开关', () => {
+  const s = snap({ courses: [course], rules: [weekly] })
+  const task: Task = { id: 't1', courseId: 'c1', title: '第三章习题', kind: 'homework', due: '2026-09-10', done: false, createdAt: 0 }
+
+  it('两个都关：一条事件都不写，连「第 N 周」也不写', () => {
+    expect(planCalendar(s, [task], { ...prefs, classRemind: false, taskRemind: false }, now)).toEqual([])
+  })
+
+  it('只开上课：写课与周次，不写作业', () => {
+    const ev = planCalendar(s, [task], { ...prefs, classRemind: true, taskRemind: false }, now)
+    expect(ev.length).toBeGreaterThan(0)
+    expect(ev.every((e) => e.kind === 'course' || e.kind === 'week')).toBe(true)
+  })
+
+  it('只开作业：只写作业', () => {
+    const ev = planCalendar(s, [task], { ...prefs, classRemind: false, taskRemind: true }, now)
+    expect(ev.map((e) => e.kind)).toEqual(['task'])
+  })
+
+  it('没有学期快照时，作业仍然按开关写出去', () => {
+    expect(planCalendar(null, [task], prefs, now).map((e) => e.kind)).toEqual(['task'])
+    expect(planCalendar(null, [task], { ...prefs, taskRemind: false }, now)).toEqual([])
   })
 })
 

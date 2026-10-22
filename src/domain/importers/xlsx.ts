@@ -1,13 +1,19 @@
-import * as XLSX from 'xlsx'
 import type { Diagnostic } from '../types'
 import type { CsvMapping, RuleCourse, RuleOutput } from '../importer'
 import { parseWeekday } from '../importer'
 import { parsePeriodRange } from '../weeks'
 
-/* Excel(.xlsx/.xls) 导入：第一个工作表按行读取，列映射同 CSV。 */
+/* Excel(.xlsx/.xls) 导入：第一个工作表按行读取，列映射同 CSV。
+   xlsx 解析器本身约 333 KB，改成用到时再拉：冷启动路径不再为它付解析与执行的代价。 */
 
-export function parseXlsx(bytes: Uint8Array, map: CsvMapping): RuleOutput {
+export async function parseXlsx(bytes: Uint8Array, map: CsvMapping): Promise<RuleOutput> {
   const diags: Diagnostic[] = []
+  let XLSX: typeof import('xlsx')
+  try {
+    XLSX = await import('xlsx')
+  } catch {
+    return { courses: [], diagnostics: [{ level: 'error', code: 'NO_PARSER', message: 'Excel 解析组件加载失败，请重试' }] }
+  }
   let rows: string[][]
   try {
     const wb = XLSX.read(bytes, { type: 'array' })

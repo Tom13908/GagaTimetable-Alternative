@@ -66,6 +66,48 @@ interface TtEduPlugin {
 
 const TtEdu = registerPlugin<TtEduPlugin>('TtEdu')
 
+/** 教务系统直连（原生 TtZf 插件）：不经过 WebView，用账号密码自己完成正方登录并调课表接口。
+    放在这里是因为自动更新要用它重新登录——那条路也要原生能力，且不该去引 UI 模块。 */
+export interface ZfStage {
+  name: string
+  ms: number
+}
+
+export interface ZfFetchResult {
+  /** 课表接口的响应体原文 */
+  json: string
+  xnm: string
+  xqm: string
+  /** 学期不是从课表页下拉框读到的，是按当前月份推断的 */
+  termGuessed: boolean
+  menuId: string
+  requests: number
+  elapsedMs: number
+  stages: ZfStage[]
+}
+
+/** 原生侧抛回来的失败：message 是给人看的整句，code 给程序分支用，data 里带阶段与教务系统的原话。 */
+export interface ZfFail extends Error {
+  code?: string
+  data?: { stage?: string; code?: string; serverMessage?: string }
+}
+
+/** 这些 code 表示「人得去处理」——凭据不对、账号锁了、要验证码；其余归为环境/网络问题 */
+const NEEDS_HUMAN = new Set(['bad_credentials', 'account_locked', 'captcha_required', 'login_rejected'])
+export const zfNeedsHuman = (e: unknown): boolean => NEEDS_HUMAN.has((e as ZfFail)?.code ?? '')
+
+interface TtZfPlugin {
+  fetch(o: { url: string; user: string; password: string; insecure?: boolean }): Promise<ZfFetchResult>
+}
+
+const TtZf = registerPlugin<TtZfPlugin>('TtZf')
+
+/** 原生插件只在应用内存在 */
+export const zfLoginAvailable = () => Capacitor.getPlatform() === 'android'
+
+export const zfFetch = (url: string, user: string, password: string, insecure = false): Promise<ZfFetchResult> =>
+  TtZf.fetch({ url, user, password, insecure })
+
 export const nativeEdu = () => Capacitor.getPlatform() === 'android'
 
 export const RUN_TIMEOUT = 20_000

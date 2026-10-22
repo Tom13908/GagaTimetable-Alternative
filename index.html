@@ -12,18 +12,132 @@
         if (t !== 'light') document.documentElement.dataset.theme = t
       })()
     </script>
-    <link rel="preload" as="image" href="/wall.jpg" />
-    <link rel="preload" as="image" href="/mascot.png" />
-    <link rel="preload" as="image" href="/intro-bg.jpg" />
-    <link rel="preload" as="image" href="/avatar.jpg" />
     <style>
       html, body { margin: 0; background: #F7F7F6; }
       [data-theme='dark'], [data-theme='dark'] body { background: #111214; }
       [data-theme='black'], [data-theme='black'] body { background: #000; }
     </style>
+    <!-- 静态首屏壳：不依赖任何 JS 框架，随文档第一时间绘制；壳画完就撤系统开屏，不等 React。
+         只在已走过向导的用户身上启用（见 body 末尾的脚本），避免与欢迎页/向导打架。 -->
+    <style>
+      #boot {
+        position: fixed; inset: 0; z-index: 9000; overflow: hidden;
+        background: var(--boot-bg); color: var(--boot-ink);
+        -webkit-user-select: none; user-select: none;
+      }
+      /* 和 .shell-w 同一套断点：骨架先按终宽铺好，React 接管后不会看到一次「由宽缩窄」的跳变 */
+      #boot .shell { position: relative; height: 100%; max-width: 430px; margin: 0 auto; overflow: hidden; }
+      @media (min-width: 600px) { #boot .shell { max-width: 600px; } }
+      @media (min-width: 840px) { #boot .shell { max-width: 720px; } }
+      @media (min-width: 1000px) { #boot .shell { max-width: 900px; } }
+      #boot.boot-out { opacity: 0; transition: opacity .2s ease; pointer-events: none; }
+      :root, [data-theme='light'] {
+        --boot-bg: #F7F7F6; --boot-surface: #FFFFFF; --boot-line: #E5E5E3;
+        --boot-bar: #ECECEA; --boot-bar-strong: #E0E0DE; --boot-dock: rgba(250,250,250,.99);
+        --boot-dock-shadow: 0 0 30px 10px #F2F2F1, 0 0 15px 5px #F2F2F1;
+      }
+      [data-theme='dark'] {
+        --boot-bg: #111214; --boot-surface: #1C1D21; --boot-line: #2F3036;
+        --boot-bar: #232429; --boot-bar-strong: #2C2D33; --boot-dock: rgba(31,32,37,.99);
+        --boot-dock-shadow: 0 8px 30px rgba(0,0,0,.5);
+      }
+      [data-theme='black'] {
+        --boot-bg: #000; --boot-surface: #121214; --boot-line: #262629;
+        --boot-bar: #17171A; --boot-bar-strong: #1F1F23; --boot-dock: rgba(20,20,22,.99);
+        --boot-dock-shadow: 0 8px 30px rgba(0,0,0,.6);
+      }
+      #boot .b { border-radius: 6px; background: var(--boot-bar); }
+      #boot .b.s { background: var(--boot-bar-strong); }
+      #boot .head { display: flex; align-items: flex-end; justify-content: space-between; padding: 0 20px; margin-top: 22px; }
+      #boot .body { padding: 0 20px; margin-top: 24px; }
+      #boot .dayhead { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 22px; }
+      #boot .row { display: flex; align-items: stretch; padding: 6px 0; }
+      #boot .times { width: 44px; flex: none; padding-top: 14px; }
+      #boot .rail { width: 2px; flex: none; margin-left: 12px; background: var(--boot-line); }
+      #boot .cardwrap { flex: 1; min-width: 0; padding-left: 16px; }
+      #boot .card { border-radius: 16px; background: var(--boot-surface); padding: 14px 16px; }
+      #boot .dock {
+        position: absolute; left: 50%; transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom)); width: 92%;
+        display: flex; align-items: center; justify-content: space-between;
+        border-radius: 999px; padding: 5px; background: var(--boot-dock);
+        box-shadow: var(--boot-dock-shadow);
+      }
+      #boot .dock i { display: block; margin: 0 auto; }
+      #boot .tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0 5px; }
+      @keyframes bootPulse { 0%, 100% { opacity: 1 } 50% { opacity: .55 } }
+      #boot .b { animation: bootPulse 1.5s ease-in-out infinite; }
+      @media (prefers-reduced-motion: reduce) { #boot .b { animation: none } }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot" hidden>
+      <div class="shell">
+      <div class="head">
+        <div class="b s" style="width: 74px; height: 20px"></div>
+        <div class="b" style="width: 96px; height: 14px"></div>
+      </div>
+      <div class="body">
+        <div class="dayhead">
+          <div class="b s" style="width: 52px; height: 17px"></div>
+          <div class="b" style="width: 104px; height: 12px"></div>
+        </div>
+        <div class="row">
+          <div class="times"><div class="b" style="width: 30px; height: 11px; margin-bottom: 6px"></div><div class="b" style="width: 34px; height: 11px"></div></div>
+          <div class="rail"></div>
+          <div class="cardwrap"><div class="card"><div class="b s" style="width: 62%; height: 15px; margin-bottom: 10px"></div><div class="b" style="width: 44%; height: 11px"></div></div></div>
+        </div>
+        <div class="row">
+          <div class="times"><div class="b" style="width: 30px; height: 11px; margin-bottom: 6px"></div><div class="b" style="width: 34px; height: 11px"></div></div>
+          <div class="rail"></div>
+          <div class="cardwrap"><div class="card"><div class="b s" style="width: 54%; height: 15px; margin-bottom: 10px"></div><div class="b" style="width: 38%; height: 11px"></div></div></div>
+        </div>
+        <div class="row">
+          <div class="times"><div class="b" style="width: 30px; height: 11px; margin-bottom: 6px"></div><div class="b" style="width: 34px; height: 11px"></div></div>
+          <div class="rail"></div>
+          <div class="cardwrap"><div class="card"><div class="b s" style="width: 68%; height: 15px; margin-bottom: 10px"></div><div class="b" style="width: 50%; height: 11px"></div></div></div>
+        </div>
+        <div class="row">
+          <div class="times"><div class="b" style="width: 30px; height: 11px; margin-bottom: 6px"></div><div class="b" style="width: 34px; height: 11px"></div></div>
+          <div class="rail"></div>
+          <div class="cardwrap"><div class="card"><div class="b s" style="width: 58%; height: 15px; margin-bottom: 10px"></div><div class="b" style="width: 42%; height: 11px"></div></div></div>
+        </div>
+      </div>
+      <div class="dock">
+        <div class="tab"><div class="b s" style="width: 22px; height: 22px; border-radius: 8px"></div><div class="b" style="width: 20px; height: 8px"></div></div>
+        <div class="tab"><div class="b" style="width: 22px; height: 22px; border-radius: 8px"></div><div class="b" style="width: 20px; height: 8px"></div></div>
+        <div class="tab"><div class="b" style="width: 22px; height: 22px; border-radius: 8px"></div><div class="b" style="width: 20px; height: 8px"></div></div>
+        <div class="tab"><div class="b" style="width: 22px; height: 22px; border-radius: 8px"></div><div class="b" style="width: 20px; height: 8px"></div></div>
+      </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var drop = function () {
+          var b = document.getElementById('boot')
+          if (!b || b.classList.contains('boot-out')) return
+          b.classList.add('boot-out')
+          setTimeout(function () { b.remove() }, 220)
+        }
+        window.__ttDropBoot = drop
+        // 只给走过的老用户用壳：向导/欢迎页有自己的首屏，不抢
+        if (localStorage.getItem('tt.onboarded.v1') !== '1') return
+        var boot = document.getElementById('boot')
+        if (!boot) return
+        boot.hidden = false
+        // Capacitor 的桥脚本由原生注入在 <head> 之后，这里已经能拿到 window.Capacitor
+        var ready = function () {
+          try {
+            var cap = window.Capacitor
+            if (cap && cap.nativePromise) cap.nativePromise('WidgetBridge', 'ready', {}).catch(function () {})
+          } catch (e) {}
+        }
+        requestAnimationFrame(function () { requestAnimationFrame(ready) })
+        // 兜底：React 迟迟没接管时也要把壳收掉
+        setTimeout(drop, 6000)
+      })()
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

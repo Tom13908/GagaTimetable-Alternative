@@ -1,10 +1,16 @@
 /**
- * 教务自动更新：保留学校的 WebView 会话（只有 Cookie，不存账号密码），
- * 在不可见 WebView 里打开课表页，用导入时同一套脚本取课表，走同一套合并逻辑。
- * 会话失效只标记「需要重新登录」，不重试；连续三次失效自动关闭。
+ * 教务自动更新：在不可见 WebView 里打开导入时记下的课表页，复用那里的会话取课表，
+ * 走同一套合并逻辑。会话失效只标记「需要重新登录」，不重试；连续三次失效自动关闭。
+ *
+ * 正方额外有一条更稳的路：如果手里有账号密码（导入时或设置页填的），
+ * 就用原生直连重新登录一遍，完全不依赖 WebView 会话——会话过期也能自己回来。
+ *
+ * 什么时候跑由用户选：mode='launch' 每次冷启动跑一次，mode='interval' 隔 intervalHours 小时跑一次
+ * （冷启动与回到前台时各检查一次）。
  */
 import { useSyncExternalStore } from 'react'
 import type { RuleManifest } from '../domain/rules'
+import type { Semester } from '../domain/types'
 import type { School } from '../domain/edu/schools'
 import { detectSystem, isTimetablePage } from '../domain/edu/systems'
 import { parseZfKbList, termLabel, type ZfKb, type ZfTerm } from '../domain/edu/zhengfang'
@@ -13,7 +19,7 @@ import { normalize, type NormalizedCourse, type RuleOutput } from '../domain/imp
 import { uid } from '../domain/store'
 import { store } from './store'
 import { extendGrid, semesterEnded } from './semester'
-import { edu, eduProfile, nativeEdu, type EduBgNav } from './edu-browser'
+import { edu, eduProfile, nativeEdu, zfFetch, zfNeedsHuman, type EduBgNav, type ZfFetchResult } from './edu-browser'
 
 export const EDU_RULE: RuleManifest = { id: 'builtin-edu', name: '教务系统', version: '1.0', input: 'json', createdAt: 0, updatedAt: 0 }
 
@@ -24,13 +30,28 @@ export interface EduSyncSource {
   school: School
   pageUrl: string
   term?: ZfTerm
+  /** 自动更新用的登录凭据。留空就只靠 WebView 会话，会话过期必须人工重登 */
+  user?: string
+  password?: string
 }
+
+/** 什么时候自动跑：每次冷启动 / 每隔若干小时 */
+export type EduSyncMode = 'launch' | 'interval'
+export const DEFAULT_INTERVAL_HOURS = 6
+/** 间隔的上限：一个月，再长就等于没开 */
+export const MAX_INTERVAL_HOURS = 720
 
 export interface EduSync extends EduSyncSource {
   enabled: boolean
+  user: string
+  password: string
+  mode: EduSyncMode
+  intervalHours: number
   lastAt: number
   lastResult: EduSyncResult | ''
   lastChanges: number
+  /** 上次拉取用了多少毫秒 */
+  lastMs: number
   failStreak: number
 }
 
@@ -40,15 +61,18 @@ export interface SyncOutcome {
   message?: string
   /** 连续失效自动关闭时的提示 */
   note?: string
+  /** 本次拉取实际用了多久（毫秒） */
+  elapsedMs: number
 }
 
 const KEY = 'tt.edu.sync'
 const PAGE_TIMEOUT = 45_000
-const RESUME_GAP = 6 * 3600_000
 /** 连续失效几次后自动关闭 */
 const MAX_EXPIRED = 3
 
 let cur: EduSync | null | undefined
+/** 本次拉取的起点，finish() 用它算耗时 */
+let syncT0 = 0
 const subs = new Set<() => void>()
 
 function load(): EduSync | null {
@@ -62,9 +86,14 @@ function load(): EduSync | null {
           pageUrl: v.pageUrl,
           term: v.term,
           enabled: !!v.enabled,
+          user: typeof v.user === 'string' ? v.user : '',
+          password: typeof v.password === 'string' ? v.password : '',
+          mode: v.mode === 'launch' ? 'launch' : 'interval',
+          intervalHours: typeof v.intervalHours === 'number' && v.intervalHours > 0 ? v.intervalHours : DEFAULT_INTERVAL_HOURS,
           lastAt: typeof v.lastAt === 'number' ? v.lastAt : 0,
           lastResult: v.lastResult ?? '',
           lastChanges: typeof v.lastChanges === 'number' ? v.lastChanges : 0,
+          lastMs: typeof v.lastMs === 'number' ? v.lastMs : 0,
           failStreak: typeof v.failStreak === 'number' ? v.failStreak : 0,
         }
       : null
@@ -97,19 +126,60 @@ export function useEduSync(): EduSync | null {
   )
 }
 
-/** 导入完成时开启：重新登录后再导入也走这里，失效计数清零 */
+/** 导入完成时开启：重新登录后再导入也走这里，失效计数清零。
+    同一所学校时保留已存的账号密码与更新方式——导入那一刻填不出来，不该把之前存的抹掉。 */
 export function enableEduSync(src: EduSyncSource) {
   const prev = load()
-  const same = prev && eduProfile(prev.school.url) === eduProfile(src.school.url)
+  const same = !!prev && eduProfile(prev.school.url) === eduProfile(src.school.url)
   save({
-    ...src,
+    school: src.school,
+    pageUrl: src.pageUrl,
+    term: src.term,
     enabled: true,
+    user: src.user ?? (same ? prev.user : ''),
+    password: src.password ?? (same ? prev.password : ''),
+    mode: same ? prev.mode : 'interval',
+    intervalHours: same ? prev.intervalHours : DEFAULT_INTERVAL_HOURS,
     lastAt: same ? prev.lastAt : 0,
     lastResult: same && prev.lastResult !== 'expired' ? prev.lastResult : '',
     lastChanges: same ? prev.lastChanges : 0,
+    lastMs: same ? prev.lastMs : 0,
     failStreak: 0,
   })
 }
+
+/** 设置页保存：学校、账号密码、更新方式一次写完；同一所学校保留上次更新时间与结果 */
+export function saveEduSetup(v: {
+  school: School
+  pageUrl: string
+  term?: ZfTerm
+  user: string
+  password: string
+  enabled: boolean
+  mode: EduSyncMode
+  intervalHours: number
+}) {
+  const prev = load()
+  const same = !!prev && eduProfile(prev.school.url) === eduProfile(v.school.url)
+  save({
+    school: v.school,
+    pageUrl: v.pageUrl,
+    term: v.term,
+    enabled: v.enabled,
+    user: v.user,
+    password: v.password,
+    mode: v.mode,
+    intervalHours: Math.min(MAX_INTERVAL_HOURS, Math.max(1, v.intervalHours)),
+    lastAt: same ? prev.lastAt : 0,
+    lastResult: same && prev.lastResult !== 'expired' ? prev.lastResult : '',
+    lastChanges: same ? prev.lastChanges : 0,
+    lastMs: same ? prev.lastMs : 0,
+    failStreak: 0,
+  })
+}
+
+/** 有没有可用于自动重登的凭据 */
+const hasEduCredentials = (s: EduSync | null): boolean => !!s && !!s.user && !!s.password
 
 export function setEduSyncEnabled(on: boolean) {
   const s = load()
@@ -117,7 +187,7 @@ export function setEduSyncEnabled(on: boolean) {
   save({ ...s, enabled: on, failStreak: on ? 0 : s.failStreak })
 }
 
-/** 退出登录：删掉该学校的 WebView Profile 与记录 */
+/** 退出登录：删掉该学校的 WebView Profile、账号密码与记录 */
 export async function logoutEduSync(): Promise<void> {
   const s = load()
   save(null)
@@ -171,25 +241,70 @@ export function countChanges(incoming: NormalizedCourse[]): number {
 const looksExpired = (e: unknown) => e instanceof Error && /JSON|token|Unexpected/i.test(e.message)
 
 function finish(s: EduSync, result: EduSyncResult, message?: string, changes = 0): SyncOutcome {
+  const elapsedMs = Math.min(600_000, Math.round(performance.now() - syncT0))
   const failStreak = result === 'expired' ? s.failStreak + 1 : result === 'error' ? s.failStreak : 0
   let enabled = s.enabled
   let note: string | undefined
   if (failStreak >= MAX_EXPIRED && enabled) {
     enabled = false
-    note = '该学校不支持保持登录，已关闭自动更新'
+    note = hasEduCredentials(s)
+      ? '连续几次都没能自动更新，已关闭。检查设置里的账号密码'
+      : '该学校不支持保持登录，已关闭自动更新'
   }
-  save({ ...s, enabled, lastAt: Date.now(), lastResult: result, lastChanges: changes, failStreak })
-  return { result, changes, message, note }
+  save({ ...s, enabled, lastAt: Date.now(), lastResult: result, lastChanges: changes, lastMs: elapsedMs, failStreak })
+  return { result, changes, message, note, elapsedMs }
+}
+
+/** 解析结果 → 和当前课表比 → 入库。直连与会话两条路共用这一段 */
+function commit(s: EduSync, out: RuleOutput, sem: Semester, t0: number): SyncOutcome {
+  if (out.courses.length === 0) return finish(s, 'error', '没有解析出课程')
+  const need = Math.min(20, Math.max(0, ...out.courses.map((c) => c.endPeriod)))
+  const target = need > sem.timeGrid.length ? { ...sem, timeGrid: extendGrid(sem.timeGrid, need) } : sem
+  const pending = normalize(out, target)
+  const changes = countChanges(pending.courses)
+  if (changes === 0) return finish(s, 'nochange')
+  if (target !== sem) store.setSemester(target)
+  store.applyImport(pending.courses, {
+    id: uid(), semesterId: target.id,
+    ruleId: EDU_RULE.id, ruleName: EDU_RULE.name, ruleVersion: EDU_RULE.version,
+    at: Date.now(), durationMs: Math.max(1, Math.round(performance.now() - t0)),
+    failed: pending.diagnostics.filter((d) => d.level === 'error').length, diagnostics: pending.diagnostics,
+  })
+  return finish(s, 'ok', undefined, changes)
+}
+
+/** 有账号密码的正方：原路重跑一次直连，不碰 WebView 会话 */
+async function syncDirect(s: EduSync, sem: Semester, t0: number): Promise<SyncOutcome> {
+  let r: ZfFetchResult
+  try {
+    r = await zfFetch(s.school.url, s.user, s.password)
+  } catch (e) {
+    return finish(s, zfNeedsHuman(e) ? 'expired' : 'error', e instanceof Error ? e.message : undefined)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(r.json)
+  } catch {
+    return finish(s, 'expired', '课表接口返回的不是 JSON，可能没登上')
+  }
+  const out: RuleOutput = { ...parseZfKbList(parsed), semester: { name: termLabel({ xnm: r.xnm, xqm: r.xqm }) } }
+  return commit(s, out, sem, t0)
 }
 
 async function doSync(): Promise<SyncOutcome> {
+  syncT0 = performance.now()
   const s = load()
-  if (!s) return { result: 'error', changes: 0, message: '未开启自动更新' }
-  if (!nativeEdu()) return { result: 'error', changes: 0, message: '仅在应用内可用' }
-  if (browserOpen) return { result: 'error', changes: 0, message: '浏览器打开中' }
+  if (!s) return { result: 'error', changes: 0, message: '未开启自动更新', elapsedMs: 0 }
+  if (!nativeEdu()) return { result: 'error', changes: 0, message: '仅在应用内可用', elapsedMs: 0 }
+  if (browserOpen) return { result: 'error', changes: 0, message: '浏览器打开中', elapsedMs: 0 }
   const sem = store.state.semester
   if (!sem || semesterEnded(sem)) return finish(s, 'error', '学期已结束')
   const t0 = performance.now()
+
+  if (hasEduCredentials(s) && detectSystem(s.school.url, s.school.system) === 'zhengfang_new') {
+    return syncDirect(s, sem, t0)
+  }
+
   try {
     const page = waitPage()
     await edu.bgOpen(s.pageUrl)
@@ -210,21 +325,7 @@ async function doSync(): Promise<SyncOutcome> {
     } else {
       out = parseHtml(await edu.bgPageHtml(), { mode: 'grid' })
     }
-    if (out.courses.length === 0) return finish(s, 'error', '没有解析出课程')
-
-    const need = Math.min(20, Math.max(0, ...out.courses.map((c) => c.endPeriod)))
-    const target = need > sem.timeGrid.length ? { ...sem, timeGrid: extendGrid(sem.timeGrid, need) } : sem
-    const pending = normalize(out, target)
-    const changes = countChanges(pending.courses)
-    if (changes === 0) return finish(s, 'nochange')
-    if (target !== sem) store.setSemester(target)
-    store.applyImport(pending.courses, {
-      id: uid(), semesterId: target.id,
-      ruleId: EDU_RULE.id, ruleName: EDU_RULE.name, ruleVersion: EDU_RULE.version,
-      at: Date.now(), durationMs: Math.max(1, Math.round(performance.now() - t0)),
-      failed: pending.diagnostics.filter((d) => d.level === 'error').length, diagnostics: pending.diagnostics,
-    })
-    return finish(s, 'ok', undefined, changes)
+    return commit(s, out, sem, t0)
   } catch (e) {
     return finish(s, 'error', e instanceof Error ? e.message : undefined)
   } finally {
@@ -244,14 +345,28 @@ export function syncNow(): Promise<SyncOutcome> {
   return running
 }
 
-export const eduSyncing = () => running !== null
+/** 距上次更新够久了没有（「每次冷启动」这种方式永远算够） */
+function due(s: EduSync): boolean {
+  if (s.mode === 'launch') return true
+  return Date.now() - s.lastAt >= s.intervalHours * 3600_000
+}
 
-/** 回前台静默检查：开着、距上次超过 6 小时、上次不是失效 */
-export function resumeSync(): Promise<SyncOutcome> | null {
+/** 上次是会话失效停下的、手里又没有账号密码：再试也是白试，直接跳过 */
+const canTry = (s: EduSync): boolean => !(s.lastResult === 'expired' && !hasEduCredentials(s))
+
+/** App 冷启动时调用：按设置决定跑不跑 */
+export function syncOnLaunch(): Promise<SyncOutcome> | null {
   const s = load()
   if (!s || !s.enabled || browserOpen || running) return null
-  if (s.lastResult === 'expired') return null
-  if (Date.now() - s.lastAt < RESUME_GAP) return null
+  if (!canTry(s) || !due(s)) return null
+  return syncNow()
+}
+
+/** 回到前台：「每隔若干小时」这种方式才需要在此时补检查一次 */
+export function resumeSync(): Promise<SyncOutcome> | null {
+  const s = load()
+  if (!s || !s.enabled || s.mode !== 'interval' || browserOpen || running) return null
+  if (!canTry(s) || !due(s)) return null
   return syncNow()
 }
 
@@ -280,12 +395,19 @@ function when(at: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
 }
 
-/** 学期页状态行文案 */
+/** 耗时文案：不足 1 秒就说毫秒 */
+export function elapsedText(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))} 毫秒`
+  return `${(ms / 1000).toFixed(1)} 秒`
+}
+
+/** 自动更新页的状态行文案 */
 export function statusText(s: EduSync): { text: string; danger: boolean } {
   if (s.lastResult === 'expired') return { text: '需要重新登录', danger: true }
   if (!s.lastAt || !s.lastResult) return { text: s.enabled ? '还没更新过' : '已关闭', danger: false }
   const t = when(s.lastAt)
-  if (s.lastResult === 'ok') return { text: `${t}，${s.lastChanges} 处变更`, danger: false }
-  if (s.lastResult === 'nochange') return { text: `${t}，无变化`, danger: false }
+  const ms = s.lastMs > 0 ? `用时 ${elapsedText(s.lastMs)}，` : ''
+  if (s.lastResult === 'ok') return { text: `${t}，${ms}${s.lastChanges} 处变更`, danger: false }
+  if (s.lastResult === 'nochange') return { text: `${t}，${ms}无变化`, danger: false }
   return { text: `${t}，更新失败`, danger: false }
 }

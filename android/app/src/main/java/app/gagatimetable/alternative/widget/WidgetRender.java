@@ -1,4 +1,4 @@
-package app.timetable.widget;
+package app.gagatimetable.alternative.widget;
 
 import android.app.PendingIntent;
 import android.content.Context;
@@ -10,17 +10,18 @@ import android.widget.RemoteViews;
 import java.util.ArrayList;
 import java.util.List;
 
-import app.timetable.MainActivity;
-import app.timetable.R;
-import app.timetable.widget.WidgetStore.Data;
-import app.timetable.widget.WidgetStore.Day;
-import app.timetable.widget.WidgetStore.Item;
+import app.gagatimetable.alternative.MainActivity;
+import app.gagatimetable.alternative.R;
+import app.gagatimetable.alternative.widget.WidgetStore.Data;
+import app.gagatimetable.alternative.widget.WidgetStore.Day;
+import app.gagatimetable.alternative.widget.WidgetStore.Item;
 
 /** 把快照画成 RemoteViews。间距、字号、配色对齐原型 10 屏的小组件。 */
 public final class WidgetRender {
 
-    /** 今日/今明两天每列的行数，与原型一致 */
-    private static final int ROWS = 2;
+    /** 今日最多四行、今明两天每列最多三行，具体画几行由格子高度决定 */
+    private static final int MAX_ROWS = 4;
+    private static final int MAX_ROWS_TWO_DAYS = 3;
 
     /** 卡片配色，与页面三套主题的 --c-surface / --c-ink* / --c-accent / --c-tint-base / --c-ink-mix 一一对应 */
     static final class Palette {
@@ -66,8 +67,8 @@ public final class WidgetRender {
     private WidgetRender() {
     }
 
-    public static RemoteViews build(Context ctx, String style, Data data, long now) {
-        RemoteViews v = new RemoteViews(ctx.getPackageName(), layoutOf(style));
+    public static RemoteViews build(Context ctx, String style, Data data, long now, int hDp) {
+        RemoteViews v = new RemoteViews(ctx.getPackageName(), layoutOf(style, hDp));
         v.setOnClickPendingIntent(R.id.widget_root, open(ctx));
         Palette p = palette(ctx);
         v.setInt(R.id.widget_root_bg, "setColorFilter", p.surface);
@@ -78,21 +79,41 @@ public final class WidgetRender {
                 next(ctx, v, p, data, today, now);
                 break;
             case "twoDays":
-                twoDays(ctx, v, p, data, today, now);
+                twoDays(ctx, v, p, data, today, now, rowsTwo(hDp, MAX_ROWS_TWO_DAYS));
                 break;
             case "week":
                 week(ctx, v, p, data, today, now);
                 break;
             default:
-                todayList(ctx, v, p, data, today, now);
+                todayList(ctx, v, p, data, today, now, rows(hDp, MAX_ROWS));
         }
         return v;
     }
 
+    /**
+     * 桌面回报的高度普遍比真实可用高度大：Samsung 的 4×2 报 202dp，实测下来只有 168.7dp（差在 hsResizeRatio）。
+     * 按最坏情况打折，宁可少画一行，也不要把最后一行切成半截。
+     */
+    private static final float HEIGHT_SAFETY = 0.85f;
+
+    /** 今日：表头约 36dp、上下内边距各 12dp、一行约 38dp（13sp 课名 + 10sp 地点 + 内侧 10dp） */
+    static int rows(int hDp, int max) {
+        if (hDp <= 0) return Math.min(2, max);
+        int n = (int) Math.floor((hDp * HEIGHT_SAFETY - 60) / 38f);
+        return Math.max(1, Math.min(max, n));
+    }
+
+    /** 今天与明天：表头约 24dp、上下内边距各 10dp、一行约 34dp（11.5sp 课名两行 + 内侧 6dp，不带地点） */
+    static int rowsTwo(int hDp, int max) {
+        if (hDp <= 0) return Math.min(2, max);
+        int n = (int) Math.floor((hDp * HEIGHT_SAFETY - 48) / 34f);
+        return Math.max(1, Math.min(max, n));
+    }
+
     /** 布局里的字色是浅色默认值，这里按主题整体重设一遍；课程行、周格子的字色在各自填充时设 */
     private static void theme(Context ctx, RemoteViews v, Palette p) {
-        paint(ctx, v, p.ink, "w_day", "w_num", "w_week");
-        paint(ctx, v, p.accent, "w_wd");
+        paint(ctx, v, p.ink, "w_day", "w_day2", "w_num", "w_week");
+        paint(ctx, v, p.accent, "w_wd", "w_wd2");
         paint(ctx, v, p.ink3, "w_label", "w_unit", "w_empty");
         paint(ctx, v, p.ink4, "w_sub", "w_sub2", "w_date");
     }
@@ -104,9 +125,10 @@ public final class WidgetRender {
         }
     }
 
-    public static int layoutOf(String style) {
+    public static int layoutOf(String style, int hDp) {
         switch (style) {
-            case "next": return R.layout.widget_next;
+            /* 「下一节」缩到 2×1 后高度只剩一格：大号倒计时会把自己撑出去，改走紧凑版式 */
+            case "next": return hDp > 0 && hDp < 150 ? R.layout.widget_next_short : R.layout.widget_next;
             case "twoDays": return R.layout.widget_two_days;
             case "week": return R.layout.widget_week;
             default: return R.layout.widget_today;
@@ -231,7 +253,7 @@ public final class WidgetRender {
 
     /* ---------------- 今日列表 ---------------- */
 
-    private static void todayList(Context ctx, RemoteViews v, Palette p, Data data, String today, long now) {
+    private static void todayList(Context ctx, RemoteViews v, Palette p, Data data, String today, long now, int rows) {
         Day d = data != null ? data.day(today) : null;
         List<Item> items = live(d);
         Item cur = current(items, now);
@@ -250,7 +272,7 @@ public final class WidgetRender {
         }
         head(ctx, v, today, sub);
         empty(ctx, v, show.isEmpty() ? emptyReason(data, today) : null);
-        for (int i = 0; i < ROWS; i++) {
+        for (int i = 0; i < rows; i++) {
             Item it = i < show.size() ? show.get(i) : null;
             row(ctx, v, p, "row", i, it, it != null && it == cur, it != null && it == cur ? left(it, now) : null);
         }
@@ -271,7 +293,7 @@ public final class WidgetRender {
             v.setTextViewText(R.id.w_label, "上课中");
             v.setViewVisibility(R.id.w_num, View.VISIBLE);
             v.setTextViewText(R.id.w_num, String.valueOf(Math.max(1, (int) ((cur.endAt - now) / 60000))));
-            v.setTextViewText(R.id.w_unit, "分钟后下课");
+            v.setTextViewText(R.id.w_unit, "分钟后");
             row(ctx, v, p, "row", 0, cur, true, null);
             return;
         }
@@ -292,25 +314,30 @@ public final class WidgetRender {
             return;
         }
         v.setViewVisibility(R.id.w_num, View.VISIBLE);
+        /* 单位一律一个词：2×1 里「3小时 25 分钟后」这样的复合文本放不下，会被截成两行。
+           「上课中」标签已经说明含义，剩下的精确到小时/分钟即可；分钟余数舍入，避免 90 分钟显示成「1小时」。 */
         long mins = (nx.startAt - now) / 60000;
         if (mins >= 24 * 60) {
             v.setTextViewText(R.id.w_num, String.valueOf(WidgetStore.daysBetween(today, WidgetStore.localDate(nx.startAt))));
             v.setTextViewText(R.id.w_unit, "天后");
         } else if (mins >= 60) {
-            v.setTextViewText(R.id.w_num, String.valueOf(mins / 60));
-            long rem = mins % 60;
-            v.setTextViewText(R.id.w_unit, rem == 0 ? "小时后" : "小时 " + rem + " 分钟后");
+            v.setTextViewText(R.id.w_num, String.valueOf((mins + 59) / 60));
+            v.setTextViewText(R.id.w_unit, "小时");
         } else {
             v.setTextViewText(R.id.w_num, String.valueOf(Math.max(1, mins)));
-            v.setTextViewText(R.id.w_unit, "分钟后");
+            v.setTextViewText(R.id.w_unit, "分钟");
         }
         row(ctx, v, p, "row", 0, nx, false, null);
     }
 
     /* ---------------- 今天与明天 ---------------- */
 
-    /** 左列是今天（上完就换成下一个有课的日子），右列是再往后一个有课的日子 */
-    private static void twoDays(Context ctx, RemoteViews v, Palette p, Data data, String today, long now) {
+    /**
+     * 左列是今天（上完就换成下一个有课的日子），右列是再往后一个有课的日子。
+     * 两列的表头都要有日期和星期：只给右列一个「周四 3 节」的副标题，看起来像是左列的一部分，
+     * 而且今天已经上完课时左列表头还写「20 周二」、下面列的却是周三的课。
+     */
+    private static void twoDays(Context ctx, RemoteViews v, Palette p, Data data, String today, long now, int rows) {
         Day d = data != null ? data.day(today) : null;
         List<Item> items = live(d);
         Item cur = current(items, now);
@@ -324,21 +351,23 @@ public final class WidgetRender {
             if (nx != null) {
                 show = live(nx);
                 anchor = nx.date;
-                sub = dayName(today, nx.date) + " " + show.size() + " 节";
+                sub = show.size() + " 节";
             } else {
                 sub = "";
             }
         }
-        head(ctx, v, today, sub);
+        head(ctx, v, anchor, sub);
         empty(ctx, v, show.isEmpty() ? emptyReason(data, today) : null);
-        for (int i = 0; i < ROWS; i++) {
+        for (int i = 0; i < rows; i++) {
             Item it = i < show.size() ? show.get(i) : null;
             row(ctx, v, p, "row", i, it, it != null && it == cur, it != null && it == cur ? left(it, now) : null);
         }
         Day second = nextClassDay(data, anchor);
         List<Item> t = live(second);
-        v.setTextViewText(R.id.w_sub2, second == null ? "" : dayName(today, second.date) + " " + t.size() + " 节");
-        for (int i = 0; i < ROWS; i++) {
+        v.setTextViewText(R.id.w_day2, second == null ? "" : String.valueOf(WidgetStore.dayOfMonth(second.date)));
+        v.setTextViewText(R.id.w_wd2, second == null ? "" : WidgetStore.weekdayLabel(WidgetStore.weekdayOf(second.date)));
+        v.setTextViewText(R.id.w_sub2, second == null ? "" : t.size() + " 节");
+        for (int i = 0; i < rows; i++) {
             row(ctx, v, p, "trow", i, i < t.size() ? t.get(i) : null, false, null);
         }
     }

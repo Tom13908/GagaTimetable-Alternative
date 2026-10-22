@@ -13,6 +13,18 @@ describe('正方新版课表解析', () => {
     expect(zcdToWeeks('1-8周(单)').weeks).toBe('1,3,5,7')
     expect(zcdToWeeks('2-8周(双),9-12周').weeks).toBe('2,4,6,8,9,10,11,12')
     expect(zcdToWeeks('1,3,5-7周').weeks).toBe('1,3,5,6,7')
+    // 正方把只上一周的课写成「第7周」，漏掉「第」会导致这条课被整条丢弃
+    expect(zcdToWeeks('第7周').weeks).toBe('7')
+    expect(zcdToWeeks('第5周').weeks).toBe('5')
+  })
+
+  it('「第x周」的课不会被丢掉', () => {
+    const out = parseZfKbList({
+      kbList: [{ kcmc: '专技资格', xm: '李四', cdmc: '实 108', xqj: '2', jcs: '4-5', zcd: '第7周' }],
+    })
+    expect(out.courses).toHaveLength(1)
+    expect(out.courses[0]).toMatchObject({ name: '专技资格', weekday: 2, startPeriod: 4, endPeriod: 5, weeks: '7' })
+    expect(out.diagnostics).toHaveLength(0)
   })
 
   it('节次串支持 3-4 / 0304 / 5', () => {
@@ -136,7 +148,7 @@ describe('未识别页出口', () => {
 
   it('反馈链接只带脱敏地址、系统猜测、版本号', () => {
     const u = new URL(issueUrl({ url: 'http://jw.x.edu.cn/kbcx/list.jsp?JSESSIONID=abc&xh=2021001', system: 'zhengfang_new', version: '1.4.55' }))
-    expect(u.pathname).toBe('/shuakami/timetable/issues/new')
+    expect(u.pathname).toBe('/Tom13908/GagaTimetable-Alternative/issues/new')
     const body = u.searchParams.get('body') ?? ''
     expect(body).toContain('http://jw.x.edu.cn/kbcx/list.jsp')
     expect(body).not.toContain('JSESSIONID')

@@ -4,7 +4,7 @@
   font-family: 'Inter Variable';
   font-style: normal;
   font-weight: 100 900;
-  font-display: block;
+  font-display: swap;
   src: url('/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
@@ -13,7 +13,7 @@
   font-family: 'Inter Variable';
   font-style: normal;
   font-weight: 100 900;
-  font-display: block;
+  font-display: swap;
   src: url('/fonts/inter-latin-ext-wght-normal.woff2') format('woff2-variations');
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
@@ -275,10 +275,59 @@ html.tt-edu #root > div,
 html.tt-edu [data-shell] {
   background: transparent !important;
 }
+/* 引导层（Onboarding）自身带内联 visibility，级联上内联优先于本表，
+   不加 !important 就盖不住它：透明模式下它仍可见，挡在原生页面与洞之间。 */
 html.tt-edu [data-shell] > *:not([data-edu-keep]),
 html.tt-edu #root > div > *:not([data-shell]) {
-  visibility: hidden;
+  visibility: hidden !important;
 }
 html.tt-edu [data-edu-keep=''] [data-veil-host] {
   background: transparent !important;
+}
+
+/* 待导入胶囊：底下整页都是学校自己的页面，白色胶囊容易被淹没。
+   改成主题色流动渐变 + 主题色投影。渐变在一个容器宽内闭合（A→B→A→B→A，background-size 200%），
+   位移 100% 正好走一个周期，循环时看不出接缝。 */
+@keyframes eduCtaFlow {
+  from { background-position: 0% 50% }
+  to { background-position: 100% 50% }
+}
+.edu-cta {
+  background: linear-gradient(100deg,
+    var(--c-accent) 0%, var(--c-accent2) 25%, var(--c-accent) 50%, var(--c-accent2) 75%, var(--c-accent) 100%);
+  background-size: 200% 100%;
+  animation: eduCtaFlow 3.6s linear infinite;
+  color: #fff;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--c-accent) 38%, transparent);
+}
+
+/* 兼容兜底：WebView 老于 Chrome 108 时不认 dvh，`height:100dvh` 会被整条丢弃，高度回落到 auto。
+   三处根容器（应用根 / 根页 / 向导根）都只靠 h-dvh 拿高度，而向导根的子级全是 absolute inset-0：
+   高度一塌成 0，向导就什么都画不出来，偏偏它外面那层 absolute inset-0 z-[90] 还在铺着吃事件，
+   于是表现为「看得见主界面、点哪个按钮都没反应」。不支持 dvh 时才用 vh 顶上。 */
+@supports not (height: 100dvh) {
+  .h-dvh { height: 100vh; }
+}
+
+/* 内容宽度分档：手机仍是 430 的单列，平板按屏宽放宽，两边不再空一大片。
+   4:3、5:4、折叠屏展开都落在 600~840 或 >840 这两档里，不用再单独写。
+   断点值和 index.html 里首屏骨架的那份必须一致，否则冷启动会看到一次跳变。 */
+.shell-w {
+  width: 100%;
+  max-width: 430px;
+  margin-inline: auto;
+}
+@media (min-width: 600px) {
+  .shell-w { max-width: 600px; }
+}
+@media (min-width: 840px) {
+  .shell-w { max-width: 720px; }
+}
+/* 平板横屏（1097 宽）用 720 还只占 66%，两侧仍是空带；再给一档 */
+@media (min-width: 1000px) {
+  .shell-w { max-width: 900px; }
+}
+/* 横屏高度紧张：标题区上边距从 52 收到 34，把纵向空间还给内容 */
+@media (max-height: 720px) and (min-width: 600px) {
+  .head-pad { padding-top: max(34px, calc(env(safe-area-inset-top) + 12px)); }
 }

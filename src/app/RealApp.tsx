@@ -29,18 +29,20 @@ import { CARD_INSET, buildAxis, rowHeights } from '../domain/time-axis'
 import { WeekAxis, WeekCard, WeekLines } from './week-axis'
 import { SchedulePage } from './schedule'
 import { EDU_RULE, EduBrowserPage, EduFailPage, EduSchoolPage, PreviewGrid, eduBack, type EduFailInfo } from './edu'
+import { EduAutoPage } from './edu-auto'
 import { edu } from './edu-browser'
-import { enableEduSync, eduSyncing, logoutEduSync, outcomeText, resumeSync, setEduSyncEnabled, statusText, syncNow, useEduSync, type EduSyncSource } from './edu-sync'
+import { enableEduSync, outcomeText, resumeSync, setEduSyncEnabled, syncOnLaunch, useEduSync, type EduSyncSource } from './edu-sync'
 import type { School } from '../domain/edu/schools'
-import { Sticker, setStickersOn, stickerTilt, useStickersOn } from './Sticker'
-import { CalendarIntroPage, NotifPrefPage, PrefPickPage, WidgetPage, taskLeadsText, type PrefKey } from './reminder'
+import { detectSystem } from '../domain/edu/systems'
+import { Sticker, setStickersOn, useStickersOn } from './Sticker'
+import { CalendarIntroPage, PrefPickPage, RemindGroup, WidgetPage, remindEnabled, type PrefKey } from './reminder'
 import { calendarPermission, calendarSupported, clearCalendar, scheduleCalendarSync, syncCalendar } from './calendar'
 import { copyText, haptic, nativeConfirm, nativeToast, pasteText, syncWidgets } from './widgets'
-import { onIncomingIcs, shareIcs } from './files'
+import { onIncomingIcs, saveIcs, shareIcs } from './files'
 import { THEME_LABEL, resolve, setDynamic, setTheme, useDynamic, useTheme, type ThemePref } from './theme'
 import {
   ActionSheet, BackPill, BottomVeil, Chips, EmptyBlock, closeTopSheet, Field, FADE, ICON, Loader, Nav, Page, PopHead, PopItem, Popover, PrimaryButton, Row, SHEET, SLIDE, SPRING, Sheet, SheetClose, SheetHead, StickyHead, TopVeil, useVeilOpacity,
-  TextAction, TextInput, TopBar, WD, WD_SHORT, dockStyle, md, tint, type Ghost, type Rect,
+  TextAction, TextInput, TopBar, WD, WD_SHORT, md, tint, type Ghost, type Rect,
   DateInput, Switch,
 } from './ui'
 
@@ -48,7 +50,7 @@ import {
 
 function Shell({ children, tab, onTab, navHidden }: { children: React.ReactNode; tab: number; onTab: (i: number) => void; navHidden?: boolean }) {
   return (
-    <div data-shell className="relative mx-auto flex h-dvh w-full max-w-[430px] flex-col overflow-hidden bg-(--c-bg) font-sans text-(--c-ink)">
+    <div data-shell className="shell-w relative flex h-dvh flex-col overflow-hidden bg-(--c-bg) font-sans text-(--c-ink)">
       {children}
       <Nav active={tab} onTab={onTab} hidden={navHidden} />
     </div>
@@ -113,8 +115,20 @@ function pressProps(onTap: () => void, onLong: (r: Rect, el: HTMLElement) => voi
 
 /* ---------------- 日期条 + 月历 ---------------- */
 
-/* 日期条：整学期连续横向滚动（原生惯性），选中项居中；只在关掉日历重新出现时播出场动画 */
-function DateStrip({ snap, anchor, onPick, onCalendar }: { snap: Snapshot; anchor: string; onPick: (d: string) => void; onCalendar: () => void }) {
+/* 日期条：整学期连续横向滚动（原生惯性），选中项居中；只在关掉日历重新出现时播出场动画。
+   整条最多铺 133 天 —— 只渲染可视窗口附近的一段，并只对这一段算 occurrencesOn。
+   左右两个占位撑住总宽，滚动时窗口按 4 天为步进平移，scrollLeft 不受影响。 */
+const DAY_W = 46
+const DAY_GAP = 5
+const DAY_PAD = 8
+const DAY_STEP = DAY_W + DAY_GAP
+const DAY_CHUNK = 4
+
+/**
+ * @param sel 高亮的那一天（「今天」页跟着滚动位置走，「课表」页就是选中的 anchor）
+ * @param anchor 只用来决定日期条铺到哪一段、以及日历跳转后滚到谁
+ */
+function DateStrip({ snap, sel, anchor, onPick, onCalendar }: { snap: Snapshot; sel: string; anchor: string; onPick: (d: string) => void; onCalendar: () => void }) {
   const today = todayStr()
   const sem = snap.semester
   const days = useMemo(() => {
@@ -124,37 +138,88 @@ function DateStrip({ snap, anchor, onPick, onCalendar }: { snap: Snapshot; ancho
     for (let d = lo; d <= hi; d = addDays(d, 1)) out.push(d)
     return out
   }, [sem, today, anchor])
+  const idx = Math.max(0, days.indexOf(sel))
+  const n = days.length
+  const [win, setWin] = useState(() => ({ lo: Math.max(0, idx - 4), hi: Math.min(n, idx + 5) }))
+  const lo = Math.max(0, Math.min(win.lo, n))
+  const hi = Math.max(lo, Math.min(win.hi, n))
   const box = useRef<HTMLDivElement>(null)
   const first = useRef(true)
+  /* 滚动事件按帧合并：惯性滑动时一帧能来好几个 scroll，逐个 setState 等于把它们全排进主线程 */
+  const scrollRaf = useRef(0)
+  /* 松手后等滚动停下来再按「停在中间的那一天」选日：滑动即换日，
+     和点一下的效果一样。程序化的居中滚动停在 anchor 上，算出来还是 anchor，不会自己乱跳。 */
+  const settleT = useRef(0)
+  /* 每天的课次只在第一次进窗口时算一遍。snap 一换就整张丢掉。 */
+  const counts = useRef<{ snap: Snapshot; map: Map<string, number> }>({ snap, map: new Map() })
+  if (counts.current.snap !== snap) counts.current = { snap, map: new Map() }
+  const countOf = (d: string) => {
+    const m = counts.current.map
+    const hit = m.get(d)
+    if (hit != null) return hit
+    const v = occurrencesOn(snap, d).length
+    m.set(d, v)
+    return v
+  }
+
+  useEffect(() => () => {
+    if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current)
+    if (settleT.current) window.clearTimeout(settleT.current)
+  }, [])
+
   useEffect(() => {
     const sc = box.current
-    const el = sc?.querySelector<HTMLElement>(`[data-d="${anchor}"]`)
-    if (!sc || !el) return
-    const left = el.offsetLeft - (sc.clientWidth - el.offsetWidth) / 2
-    sc.scrollTo({ left, behavior: first.current ? 'auto' : 'smooth' })
+    if (!sc) return
+    const cx = DAY_PAD + idx * DAY_STEP + DAY_W / 2
+    /* 只有选中项跑出可视区才把它滚回中间：「今天」页高亮跟着纵向滚动走，
+       每跨一天就把条子拽一下会像抽风；日历跳到很远的日子时才真的需要滚过去。 */
+    const vis = cx >= sc.scrollLeft + 24 && cx <= sc.scrollLeft + sc.clientWidth - 24
+    if (first.current || !vis) sc.scrollTo({ left: cx - sc.clientWidth / 2, behavior: first.current ? 'auto' : 'smooth' })
     first.current = false
-  }, [anchor, days])
+    /* 目标日可能被日历跳到很远的日子，先把窗口挪过去，免得中间空一帧 */
+    setWin((w) => (idx >= w.lo && idx < w.hi ? w : { lo: Math.max(0, idx - 6), hi: Math.min(n, idx + 7) }))
+  }, [idx, n])
+
+  const onScroll = () => {
+    if (scrollRaf.current) return
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = 0
+      const sc = box.current
+      if (!sc) return
+      const start = Math.floor((sc.scrollLeft - DAY_PAD) / (DAY_STEP * DAY_CHUNK)) * DAY_CHUNK
+      const count = Math.ceil(sc.clientWidth / DAY_STEP) + 2
+      const a = Math.max(0, start - DAY_CHUNK * 2)
+      const b = Math.min(n, start + count + DAY_CHUNK * 2)
+      setWin((w) => (w.lo === a && w.hi === b ? w : { lo: a, hi: b }))
+      /* 停在中间的那一天就是选中的那一天：滑动日期条＝换日期（原来只能点，滑过去什么都不发生） */
+      if (settleT.current) window.clearTimeout(settleT.current)
+      settleT.current = window.setTimeout(() => {
+        settleT.current = 0
+        const cx = sc.scrollLeft + sc.clientWidth / 2
+        const k = Math.round((cx - DAY_PAD - DAY_W / 2) / DAY_STEP)
+        const d = days[k]
+        if (d && d !== sel) onPick(d)
+      }, 170)
+    })
+  }
+
   return (
-    <motion.div
-      initial={{ y: 26, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      exit={{ y: 26, opacity: 0 }}
-      transition={{ type: 'spring', bounce: 0.18, duration: 0.45 }}
-      className="absolute inset-x-4 bottom-[calc(80px+max(24px,env(safe-area-inset-bottom)))] z-[9] flex items-stretch rounded-[1.5rem] py-1.5 pr-1"
-      style={dockStyle}
-    >
+    /* 和课表页一样横在上面，不再做底部浮岛：浮岛会盖住内容，两个页面手感也不一致 */
+    <div className="flex items-stretch rounded-[16px] bg-(--c-surface) py-1.5 pr-1">
       <div
         ref={box}
-        className="flex flex-1 items-stretch gap-[5px] overflow-x-auto px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        style={{ scrollSnapType: 'x proximity', WebkitOverflowScrolling: 'touch', maskImage: 'linear-gradient(90deg, transparent, #000 10px, #000 calc(100% - 10px), transparent)' }}
+        onScroll={onScroll}
+        className="flex flex-1 items-stretch overflow-x-auto px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        style={{ scrollSnapType: 'x proximity', WebkitOverflowScrolling: 'touch', touchAction: 'pan-x', maskImage: 'linear-gradient(90deg, transparent, #000 10px, #000 calc(100% - 10px), transparent)' }}
       >
-        {days.map((d) => {
-          const on = d === anchor
+        {lo > 0 && <div className="flex-none" style={{ width: lo * DAY_STEP }} />}
+        {days.slice(lo, hi).map((d) => {
+          const on = d === sel
           const past = d < today && !on
-          const n = occurrencesOn(snap, d).length
+          const nc = countOf(d)
           const monthStart = d.slice(8) === '01'
           return (
-            <button key={d} data-d={d} onClick={() => onPick(d)} className="relative flex w-[46px] flex-none flex-col items-center py-[5px]" style={{ scrollSnapAlign: 'center' }}>
+            <button key={d} data-d={d} onClick={() => onPick(d)} className="relative flex w-[46px] flex-none flex-col items-center py-[5px]" style={{ scrollSnapAlign: 'center', marginRight: DAY_GAP }}>
               {on && (
                 <motion.i
                   layoutId="date-strip-indicator"
@@ -168,15 +233,16 @@ function DateStrip({ snap, anchor, onPick, onCalendar }: { snap: Snapshot; ancho
               <span className={`relative z-10 mt-0.5 text-[10.5px] font-semibold ${on ? 'text-(--c-accent)' : past ? 'text-(--c-ink5)' : 'text-(--c-ink4)'}`}>
                 {d === today ? '今天' : monthStart ? `${Number(d.slice(5, 7))}月` : WD[weekdayOf(d)]}
               </span>
-              {n > 0 && <span className={`absolute top-[3px] right-[2px] z-10 text-[9px] font-bold tabular-nums ${on ? 'text-(--c-accent2)' : past ? 'text-(--c-line)' : 'text-(--c-ink5)'}`}>{n}</span>}
+              {nc > 0 && <span className={`absolute top-[3px] right-[2px] z-10 text-[9px] font-bold tabular-nums ${on ? 'text-(--c-accent2)' : past ? 'text-(--c-line)' : 'text-(--c-ink5)'}`}>{nc}</span>}
             </button>
           )
         })}
+        {hi < n && <div className="flex-none" style={{ width: (n - hi) * DAY_STEP }} />}
       </div>
       <button onClick={onCalendar} className="flex w-9 flex-none items-center justify-center">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style={{ stroke: 'var(--c-ink2)' }} strokeWidth="1.9"><rect x="3" y="4" width="18" height="17" rx="4" /><path d="M3 9h18M8 2v4M16 2v4" /></svg>
       </button>
-    </motion.div>
+    </div>
   )
 }
 
@@ -471,10 +537,16 @@ function TodayView({
     scrollRef.current?.scrollTo({ top: 0 })
   }, [anchor])
 
-  const week = weekOf(snap.semester, anchor)
-  const vac = inVacation(snap.semester, anchor)
+  const week = weekOf(snap.semester, view)
+  const vac = inVacation(snap.semester, view)
+  /* 标题、日期条、副标题都跟着「正在看的那一天」走：日期条高亮的是 view，
+     标题要是还写 anchor，两者就会打架（标题 10月20日、下面高亮 22 号）。
+     列表起点仍是 anchor，滚动到头也不会把列表重建。 */
+  const shownOcc = useMemo(() => occurrencesOn(snap, view), [snap, view])
+  const remain = view === today
+    ? shownOcc.filter((o) => o.end > now && o.status !== 'cancelled').length
+    : shownOcc.length
   const head = days[0]?.occ ?? []
-  const remain = anchor === today ? head.filter((o) => o.end > now && o.status !== 'cancelled').length : head.length
   const inTerm = week >= 1 && week <= snap.semester.totalWeeks
   const nothingAtAll = snap.courses.length === 0 && snap.entries.length === 0
   /* 刚下课那一刻：时间线里那节课下面直接给出记录入口 */
@@ -482,7 +554,7 @@ function TodayView({
   const [endHidden, setEndHidden] = useState<string[]>([])
   const endKey = ended ? `${ended.date}-${ended.courseId}-${ended.start}` : ''
   const showEnd = ended && !endHidden.includes(endKey)
-  const weekend = weekdayOf(anchor) >= 6
+  const weekend = weekdayOf(view) >= 6
   const termEndDay = termEnd(snap.semester)
   /* 学期第一节课还在选中日之后：整个学期还没开课；两周内都没课且已过学期末：学期已结束 */
   const free = !nothingAtAll && head.length === 0
@@ -496,12 +568,12 @@ function TodayView({
       <div
         ref={(el) => { scrollRef.current = el }}
         onScroll={onScroll}
-        className="flex-1 overflow-y-auto pb-[210px] [scrollbar-width:none]"
+        className="flex-1 overflow-y-auto pb-[130px] [scrollbar-width:none]"
       >
         <StickyHead bleed={0} className="px-5">
           <div className="flex items-start justify-between">
             <h1 className="text-[26px] font-extrabold tracking-[-.02em]">
-              {md(anchor)} <span className="font-bold text-(--c-ink5)">{WD[weekdayOf(anchor)]}</span>
+              {md(view)} <span className="font-bold text-(--c-ink5)">{WD[weekdayOf(view)]}</span>
             </h1>
             <SearchButton onClick={onSearch} />
           </div>
@@ -514,12 +586,16 @@ function TodayView({
               </>
             )}
             <span className="h-3 w-px bg-(--c-line)" />
-            {head.length > 0 ? (
-              <span>{head.length} 节课{anchor === today && <span className="text-(--c-ink5)">，剩 {remain} 节</span>}</span>
+            {shownOcc.length > 0 ? (
+              <span>{shownOcc.length} 节课{view === today && <span className="text-(--c-ink5)">，剩 {remain} 节</span>}</span>
             ) : (
-              <span className="text-(--c-ink5)">{nothingAtAll ? '暂无课表' : notStarted ? '暂未开课' : afterTerm ? '学期已结束' : '今天没有课'}</span>
+              <span className="text-(--c-ink5)">{nothingAtAll ? '暂无课表' : notStarted ? '暂未开课' : afterTerm ? '学期已结束' : view === today ? '今天没有课' : '没有课'}</span>
             )}
           </div>
+          {/* 日期条钉在标题下面：往下翻课表也一直在，不用滚回去才换天。
+              高亮的是「正在看的那一天」（view），标题也用它——以前标题写 anchor、
+              条子高亮 view，滚动时两个日期会打架；反过来只认 anchor 又会让点了日期条不动。 */}
+          {!cal && <div className="mt-2.5"><DateStrip snap={snap} sel={view} anchor={anchor} onPick={pickDay} onCalendar={() => setCal(true)} /></div>}
         </StickyHead>
         {vac && <div className="mx-5 mt-1 rounded-[16px] bg-(--c-surface) px-4 py-3 text-[13px] font-semibold text-[#9A7B3F]">{vac}</div>}
 
@@ -560,7 +636,7 @@ function TodayView({
           </div>
         ) : (
           <div className="mt-6 px-5">
-            {days.map((day, di) => {
+            {days.map((day) => {
               /* 今天里第一节还没开始的课：给出「下一节」提示，和原型一致 */
               const nextKey = day.date === today
                 ? day.occ.find((x) => x.start > now && x.status !== 'cancelled')?.key
@@ -568,18 +644,19 @@ function TodayView({
               const inClass = day.date === today && day.occ.some((x) => x.start <= now && now < x.end && x.status !== 'cancelled')
               return (
               <div key={day.date} data-day={day.date}>
-                {day.occ.length > 0 && (
-                  <div className="flex items-baseline justify-between pb-[22px]">
-                    <div className="flex items-baseline gap-2.5">
-                      <span className="text-[17px] leading-none font-extrabold tracking-[-.02em]">{day.rel}</span>
-                      <span className="text-[12.5px] font-semibold text-(--c-ink4)">{md(day.date)}{day.rel !== WD[weekdayOf(day.date)] ? ` ${WD[weekdayOf(day.date)]}` : ''}</span>
-                    </div>
-                    <span className="text-[12px] font-semibold tabular-nums text-(--c-ink5)">{day.occ.length} 节课，{fmtMinutes(day.occ[0].start)} 开始</span>
+                {/* 有没有课都摆同一个表头：以前没课的那天只写一行「无课程」，
+                    「今天」这两个大字就没了，和下面的「明天」「后天」完全不像同一套版式 */}
+                <div className="flex items-baseline justify-between pb-[22px]">
+                  <div className="flex items-baseline gap-2.5">
+                    <span className="text-[17px] leading-none font-extrabold tracking-[-.02em]">{day.rel}</span>
+                    <span className="text-[12.5px] font-semibold text-(--c-ink4)">{md(day.date)}{day.rel !== WD[weekdayOf(day.date)] ? ` ${WD[weekdayOf(day.date)]}` : ''}</span>
                   </div>
-                )}
-                {day.occ.length === 0 && di === 0 && (
-                  <div className="pb-7 text-[13.5px] font-semibold text-(--c-ink4)">{notStarted ? '暂未开课' : '无课程'}</div>
-                )}
+                  <span className="text-[12px] font-semibold tabular-nums text-(--c-ink5)">
+                    {day.occ.length > 0
+                      ? `${day.occ.length} 节课，${fmtMinutes(day.occ[0].start)} 开始`
+                      : notStarted ? '暂未开课' : '无课程'}
+                  </span>
+                </div>
                 {day.occ.map((o, oi) => {
                   const isLast = oi === day.occ.length - 1
                   const isToday = day.date === today
@@ -611,21 +688,20 @@ function TodayView({
                         </div>
                       </div>
                       <div className={`min-w-0 flex-1 pl-4 ${isLast ? 'pb-7' : ''} ${past || o.status === 'cancelled' ? 'opacity-50' : ''}`}>
-                      {/* 每节课一张卡；右侧竖列放学科贴纸和状态标签，右边缘对齐，贴纸随卡片一起抬起 */}
+                      {/* 每节课一张卡；贴纸固定钉在卡片右上角，所有课都在同一个位置。
+                          课名让出右侧那一竖条（pr-8），长课名折行也不会钻到贴纸底下。 */}
                       <div data-lift className="relative rounded-[16px] bg-(--c-surface) px-4 py-3.5">
-                        <div className="flex items-start gap-2">
-                          <div className="min-w-0 flex-1">
-                            <div className={`text-[16px] leading-[1.25] font-bold tracking-[-.01em] ${o.status === 'cancelled' ? 'line-through' : ''}`}>{o.name}</div>
-                            <div className="mt-1 flex items-center gap-2 text-[12.5px] font-medium text-(--c-ink3)">
-                              <span className="min-w-0 truncate">{[o.location, o.teacher].filter(Boolean).join('，') || '—'}</span>
-                              {o.conflict && <span className="flex-none rounded-[7px] bg-(--c-amber-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-amber)">冲突</span>}
-                              {o.status === 'moved' && <span className="flex-none rounded-[7px] bg-(--c-accent-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-accent)">已调课</span>}
-                              {o.status === 'cancelled' && <span className="flex-none rounded-[7px] bg-(--c-surface2) px-2 py-[3px] text-[10.5px] font-bold text-(--c-ink3)">停课</span>}
-                              {o.status === 'leave' && <span className="flex-none rounded-[7px] bg-(--c-rose-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-rose)">请假</span>}
-                              {o.muted && o.status === 'normal' && !past && <span className="flex-none rounded-[7px] bg-(--c-surface2) px-2 py-[3px] text-[10.5px] font-bold text-(--c-ink3)">静音</span>}
-                            </div>
+                        {sticker && <Sticker id={sticker} size={22} tilt={-4} className="pointer-events-none absolute top-3 right-4" />}
+                        <div className="min-w-0">
+                          <div className={`pr-8 text-[16px] leading-[1.25] font-bold tracking-[-.01em] ${o.status === 'cancelled' ? 'line-through' : ''}`}>{o.name}</div>
+                          <div className="mt-1 flex items-center gap-2 text-[12.5px] font-medium text-(--c-ink3)">
+                            <span className="min-w-0 truncate">{[o.location, o.teacher].filter(Boolean).join('，') || '—'}</span>
+                            {o.conflict && <span className="flex-none rounded-[7px] bg-(--c-amber-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-amber)">冲突</span>}
+                            {o.status === 'moved' && <span className="flex-none rounded-[7px] bg-(--c-accent-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-accent)">已调课</span>}
+                            {o.status === 'cancelled' && <span className="flex-none rounded-[7px] bg-(--c-surface2) px-2 py-[3px] text-[10.5px] font-bold text-(--c-ink3)">停课</span>}
+                            {o.status === 'leave' && <span className="flex-none rounded-[7px] bg-(--c-rose-soft) px-2 py-[3px] text-[10.5px] font-bold text-(--c-rose)">请假</span>}
+                            {o.muted && o.status === 'normal' && !past && <span className="flex-none rounded-[7px] bg-(--c-surface2) px-2 py-[3px] text-[10.5px] font-bold text-(--c-ink3)">静音</span>}
                           </div>
-                          {sticker && <Sticker id={sticker} size={24} tilt={-4} className="flex-none" />}
                         </div>
                         {nowOn && <div className="mt-1.5 text-[12px] font-bold tabular-nums text-(--c-accent)">上课中，现在 {fmtMinutes(now)}，还剩 {fmtDuration(o.end - now)}</div>}
                         {!nowOn && o.key === nextKey && (!inClass && o.start - now <= 60
@@ -653,11 +729,8 @@ function TodayView({
         )}
       </div>
 
-      <BottomVeil height={210} />
-      <BackPill show={!cal && view !== today} label="回到今天" bottom="calc(152px + max(24px, env(safe-area-inset-bottom)))" onClick={() => (anchor === today ? pickDay(today) : setAnchor(today))} />
-      <AnimatePresence initial={false}>
-        {!cal && <DateStrip snap={snap} anchor={view} onPick={pickDay} onCalendar={() => setCal(true)} />}
-      </AnimatePresence>
+      <BottomVeil height={130} />
+      <BackPill show={!cal && view !== today} label="回到今天" bottom="calc(80px + max(24px, env(safe-area-inset-bottom)))" onClick={() => (anchor === today ? pickDay(today) : setAnchor(today))} />
       {cal && <CalendarSheet snap={snap} mode="day" anchor={anchor} onPick={setAnchor} onClose={() => setCal(false)} />}
     </>
   )
@@ -665,35 +738,75 @@ function TodayView({
 
 /* ---------------- 周视图 ---------------- */
 
-/** 一周的日期条 + 节次网格（纵轴见 domain/time-axis）；左右滑时相邻周也各渲染一份 */
-function WeekGrid({ snap, week, anchor, today, now, setAnchor, onPick, onMenu, liftKey, gridRef, onGeometry }: {
+/**
+ * 一周的日期条：和「今天」的日期条一个待遇——钉在标题下面，往下翻课表也一直在。
+ * 早先它跟在网格里一起滚，翻到第 6 节就看不到今天几号了，也没法点着换天。
+ */
+function WeekDays({ snap, week, anchor, today, setAnchor }: {
   snap: Snapshot
   week: number
   anchor: string
   today: string
-  now: number
   setAnchor: (d: string) => void
+}) {
+  const byDay = useMemo(() => occurrencesInWeek(snap, week), [snap, week])
+  const monday = dateOf(snap.semester, week, 1)
+  const days = [1, 2, 3, 4, 5, 6, 7].map((wd) => dateOf(snap.semester, week, wd))
+  return (
+    <div className="flex items-stretch gap-[5px]">
+      <div className="-mr-[5px] flex w-8 flex-none items-center justify-center text-[10.5px] font-semibold text-(--c-ink4)">
+        {Number(monday.slice(5, 7))}月
+      </div>
+      {days.map((d) => {
+        const on = d === anchor
+        const isToday = d === today
+        const n = (byDay.get(weekdayOf(d)) ?? []).length
+        return (
+          <button key={d} onClick={() => setAnchor(d)} className="relative flex flex-1 flex-col items-center py-[5px]">
+            {on && <motion.i layoutId="week-strip-indicator" transition={SPRING} className="absolute inset-x-[-4px] inset-y-0 rounded-[13px] bg-(--c-accent-soft)" />}
+            <span className={`relative z-10 flex h-[24px] w-[24px] items-center justify-center text-[17px] leading-none font-bold tabular-nums ${isToday || on ? 'text-(--c-accent)' : 'text-(--c-ink)'}`}>{Number(d.slice(8))}</span>
+            <span className={`relative z-10 mt-0.5 text-[10.5px] font-semibold ${on || isToday ? 'text-(--c-accent)' : 'text-(--c-ink4)'}`}>{isToday ? '今天' : WD[weekdayOf(d)]}</span>
+            {n > 0 && <span className={`absolute top-[3px] right-[2px] z-10 text-[9px] font-bold tabular-nums ${on ? 'text-(--c-accent2)' : 'text-(--c-ink5)'}`}>{n}</span>}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 节次网格（纵轴见 domain/time-axis）；左右滑时相邻周也各渲染一份，日期条在 WeekView 的吸顶区里 */
+function WeekGrid({ snap, week, today, now, onPick, onMenu, liftKey, gridRef, onGeometry, fillH }: {
+  snap: Snapshot
+  week: number
+  today: string
+  now: number
   onPick: (o: Occurrence) => void
   onMenu: (o: Occurrence, r: Rect, el: HTMLElement) => void
   liftKey?: string
   gridRef?: React.MutableRefObject<HTMLDivElement | null>
   onGeometry?: (todayIdx: number, nowTop: number) => void
+  /** 可视区高度：平板上一屏比课表高得多，按这个把行拉高补满（0 表示不补） */
+  fillH?: number
 }) {
   const sem = snap.semester
   const byDay = useMemo(() => occurrencesInWeek(snap, week), [snap, week])
-  const monday = dateOf(sem, week, 1)
   const days = [1, 2, 3, 4, 5, 6, 7].map((wd) => dateOf(sem, week, wd))
   const todayIdx = days.indexOf(today)
 
-  /* 列宽决定卡片里文字折几行；首次按视口估，挂载后用真实宽度 */
-  const [colW, setColW] = useState(() => (Math.min(window.innerWidth, 430) - 98) / 7)
+  /* 列宽决定卡片里文字折几行；首次按视口估，挂载后用真实宽度（宽屏上限 720，同 .shell-w） */
+  const [colW, setColW] = useState(() => (Math.min(window.innerWidth, 720) - 98) / 7)
 
   /* 轴的范围跟着真实课程走：节次之外的早课、晚自习按真实时长延伸，不会溢出；行高按这一行卡片实际需要的高度来 */
   const axis = useMemo(() => {
     const all = [...byDay.values()].flat()
     const span = all.length > 0 ? { start: Math.min(...all.map((o) => o.start)), end: Math.max(...all.map((o) => o.end)) } : undefined
-    return buildAxis(sem.timeGrid, span, rowHeights(sem.timeGrid, all.map((o) => ({ start: o.start, end: o.end, name: o.name, loc: o.location })), colW))
-  }, [sem.timeGrid, byDay, colW])
+    const heights = rowHeights(sem.timeGrid, all.map((o) => ({ start: o.start, end: o.end, name: o.name, loc: o.location })), colW)
+    const base = buildAxis(sem.timeGrid, span, heights)
+    const periods = base.segs.filter((s) => s.kind === 'period').length
+    const extra = (fillH ?? 0) - base.height - 8
+    if (periods === 0 || extra < 40) return base
+    return buildAxis(sem.timeGrid, span, heights, Math.floor(extra / periods))
+  }, [sem.timeGrid, byDay, colW, fillH])
   const first = axis.segs[0]
   const last = axis.segs[axis.segs.length - 1]
   const gridH = axis.height + 8
@@ -720,30 +833,11 @@ function WeekGrid({ snap, week, anchor, today, now, setAnchor, onPick, onMenu, l
 
   return (
     <>
-      <div className="flex items-stretch gap-[5px]">
-        <div className="-mr-[5px] flex w-8 flex-none items-center justify-center text-[10.5px] font-semibold text-(--c-ink4)">
-          {Number(monday.slice(5, 7))}月
-        </div>
-        {days.map((d) => {
-          const on = d === anchor
-          const isToday = d === today
-          const n = (byDay.get(weekdayOf(d)) ?? []).length
-          return (
-            <button key={d} onClick={() => setAnchor(d)} className="relative flex flex-1 flex-col items-center py-[5px]">
-              {on && <motion.i layoutId="week-strip-indicator" transition={SPRING} className="absolute inset-x-[-4px] inset-y-0 rounded-[13px] bg-(--c-accent-soft)" />}
-              <span className={`relative z-10 flex h-[24px] w-[24px] items-center justify-center text-[17px] leading-none font-bold tabular-nums ${isToday || on ? 'text-(--c-accent)' : 'text-(--c-ink)'}`}>{Number(d.slice(8))}</span>
-              <span className={`relative z-10 mt-0.5 text-[10.5px] font-semibold ${on || isToday ? 'text-(--c-accent)' : 'text-(--c-ink4)'}`}>{isToday ? '今天' : WD[weekdayOf(d)]}</span>
-              {n > 0 && <span className={`absolute top-[3px] right-[2px] z-10 text-[9px] font-bold tabular-nums ${on ? 'text-(--c-accent2)' : 'text-(--c-ink5)'}`}>{n}</span>}
-            </button>
-          )
-        })}
-      </div>
-
-      <div className="relative mt-2">
-        <WeekLines axis={axis} />
-        <div className="flex pt-1.5">
+      <div className="relative mt-2 pt-1.5">
+        <div className="flex">
           <WeekAxis axis={axis} nowTop={todayIdx >= 0 && nowTop > 0 ? nowTop : undefined} nowLabel={fmtMinutes(now)} />
           <div ref={setGridEl} className="relative flex flex-1 gap-[5px]" style={{ height: gridH }}>
+            <WeekLines axis={axis} />
             {days.map((d, i) => {
               const occ = byDay.get(weekdayOf(d)) ?? []
               const pastCol = d < today
@@ -806,14 +900,6 @@ function WeekGrid({ snap, week, anchor, today, now, setAnchor, onPick, onMenu, l
                           {cluster.length}
                         </span>
                       )}
-                      {sticker && (
-                        <Sticker
-                          id={sticker}
-                          size={20}
-                          tilt={stickerTilt(o.name)}
-                          className="pointer-events-none absolute -right-1.5 -bottom-1.5 z-10"
-                        />
-                      )}
                       </div>
                     )
                   })}
@@ -861,29 +947,46 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
     if (target > 0) sc.scrollTop = target
   }, [])
 
-  /* 换周时整块网格按方向平移；横滑翻过来的那次已经滑到位，不再播 */
+  /* 换周时整块网格按方向平移；横滑翻过来的那次已经滑到位，不再播。
+     入场动画改为对同一个节点做命令式动画 —— 原来靠 motion.div 的 key={week} 重挂载来播，
+     切周会把三份周网格整棵卸载重建（实测 commit 帧 106ms），现在只更新 DOM。 */
   const seen = useRef(week)
   const swiped = useRef(false)
-  const [dir, setDir] = useState(0)
+  const enterRef = useRef<HTMLDivElement>(null)
+  const firstEnter = useRef(true)
   useEffect(() => {
+    const el = enterRef.current
     if (seen.current !== week) {
-      setDir(week > seen.current ? 1 : -1)
+      const d = week > seen.current ? 1 : -1
       seen.current = week
+      if (!swiped.current && el) animate(el, { opacity: [0, 1], x: [d * 28, 0] }, { type: 'tween', ease: SWIPE_EASE, duration: 0.22 })
+    } else if (firstEnter.current && el) {
+      animate(el, { opacity: [0, 1] }, { type: 'tween', ease: SWIPE_EASE, duration: 0.22 })
     }
+    firstEnter.current = false
     swiped.current = false
   }, [week])
 
   const x = useMotionValue(0)
+  /* 日期条自己一条轨道（三份：上周/本周/下周）。它比网格窄 20px（列宽要对齐网格），
+     所以和网格共用同一个拖动位移、但不共用终点：松手后各自滑出自己的那一屏宽度，时长一致。 */
+  const xs = useMotionValue(0)
   const box = useRef<HTMLDivElement>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
+  const stripBoxRef = useRef<HTMLDivElement>(null)
   const drag = useRef<{ x0: number; y0: number; w: number; state: 'pending' | 'drag' | 'off'; last: number; t: number; v: number } | null>(null)
 
-  const settle = (delta: -1 | 0 | 1, from: number, w: number) => {
+  const settle = (delta: -1 | 0 | 1, from: number, w: number, stripW = 0) => {
     const to = -delta * w
     const dist = Math.abs(to - from)
-    animate(x, to, { type: 'tween', ease: SWIPE_EASE, duration: Math.min(0.4, Math.max(0.2, dist / w * 0.4)) }).then(() => {
+    const opt = { type: 'tween' as const, ease: SWIPE_EASE, duration: Math.min(0.4, Math.max(0.2, dist / w * 0.4)) }
+    /* 两条一起走、同一时长：日期条滑走一排的同时网格也滑走一屏 */
+    if (stripW > 0) animate(xs, -delta * stripW, opt)
+    animate(x, to, opt).then(() => {
       if (!delta) return
       swiped.current = true
       x.jump(0)
+      xs.jump(0)
       flushSync(() => setAnchor(addDays(monday, delta * 7)))
     })
   }
@@ -919,7 +1022,9 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
   const onUp = (e: React.PointerEvent) => {
     const d = drag.current
     drag.current = null
-    if (!d || d.state !== 'drag') return
+    if (!d || d.state !== 'drag') {
+      return
+    }
     ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
     const dx = d.last
     let delta: -1 | 0 | 1 = 0
@@ -929,7 +1034,95 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
     settle(delta, x.get(), d.w)
   }
 
+  /* 日期条也能横滑换周：它钉在标题下面，是最顺手的落点。
+     拖的时候它和网格一起跟手（同一位移量），松手各自滑出自己的那一屏，
+     于是「上周的日期滑走、这周的日期滑进来」和下面的课表是同一个动作。 */
+  const strip = useRef<{ x0: number; y0: number; state: 'pending' | 'drag' | 'off'; last: number; t: number; v: number } | null>(null)
+  /* 滑动松手后浏览器还会补一个 click，别让它顺手把日期切到手指抬起的那一格 */
+  const stripSwiped = useRef(false)
+
+  const onStripDown = (e: React.PointerEvent) => {
+    strip.current = { x0: e.clientX, y0: e.clientY, state: 'pending', last: 0, t: e.timeStamp, v: 0 }
+    stripSwiped.current = false
+  }
+
+  const onStripMove = (e: React.PointerEvent) => {
+    const d = strip.current
+    if (!d || d.state === 'off') return
+    const dx = e.clientX - d.x0
+    const dy = e.clientY - d.y0
+    if (d.state === 'pending') {
+      if (Math.abs(dy) > SWIPE_LOCK && Math.abs(dy) >= Math.abs(dx)) {
+        d.state = 'off'
+        return
+      }
+      if (Math.abs(dx) <= SWIPE_LOCK) return
+      d.state = 'drag'
+      stripSwiped.current = true
+    }
+    const dt = e.timeStamp - d.t
+    if (dt > 0) d.v = (dx - d.last) / dt
+    d.last = dx
+    d.t = e.timeStamp
+    const blocked = (dx > 0 && week <= 1) || (dx < 0 && week >= sem.totalWeeks)
+    const v = blocked ? dx * 0.25 : dx
+    x.set(v)
+    xs.set(v)
+  }
+
+  const onStripUp = () => {
+    const d = strip.current
+    strip.current = null
+    if (!d || d.state !== 'drag') return
+    const w = (box.current?.clientWidth ?? 300) - 12
+    /* 裁切层左右各有 4px 内边（给选中态外扩），百分比宽度参照的是内边之内那块 */
+    const swBox = stripBoxRef.current?.clientWidth ?? 0
+    const sw = swBox > 8 ? swBox - 8 : 0
+    const dx = d.last
+    let delta: -1 | 0 | 1 = 0
+    if (dx < -w * SWIPE_RATIO || (dx < 0 && d.v < -SWIPE_VELOCITY)) delta = 1
+    else if (dx > w * SWIPE_RATIO || (dx > 0 && d.v > SWIPE_VELOCITY)) delta = -1
+    if ((delta === 1 && week >= sem.totalWeeks) || (delta === -1 && week <= 1)) delta = 0
+    window.setTimeout(() => {
+      stripSwiped.current = false
+    }, 150)
+    /* delta 为 0 时也要走一遍：两条轨道都要回弹到原位 */
+    settle(delta, dx, w, sw)
+  }
+
   const panes = [week - 1, week, week + 1]
+
+  /* 进课表时先只画当周，前后两周隔一帧再补。
+     三周一起建在 660 这类机器上要 500ms 左右，切页时首帧全花在建 DOM 上，
+     用户看到的就是「点了没反应」。先给当周，邻周随后补上，首帧就只是当周的开销。 */
+  const [sides, setSides] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setSides(true), 90)
+    return () => clearTimeout(t)
+  }, [])
+
+  /* 大屏上可视区比课表本身高得多，下面会空一大片：量出网格顶到屏底的距离，交给 WeekGrid 把行拉高补满。
+     手机（内容宽度 430）保持原样，行高完全不变。 */
+  const [fillH, setFillH] = useState(0)
+  useEffect(() => {
+    const sc = scroller.current
+    if (!sc) return
+    const measure = () => {
+      const g = gridRef.current
+      const shell = document.querySelector('[data-shell]')?.getBoundingClientRect().width ?? 0
+      if (!g || shell < 600) {
+        setFillH(0)
+        return
+      }
+      const top = g.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop
+      /* 底部 120 是给浮在内容上的底部导航让出的高度，不然最后一节会被压在 dock 下面 */
+      setFillH(Math.max(0, Math.round(sc.clientHeight - top - 120)))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(sc)
+    return () => ro.disconnect()
+  }, [])
 
   return (
     <>
@@ -947,6 +1140,29 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
             <SearchButton onClick={onSearch} />
           </div>
           </div>
+          {/* 日期条挂在标题下面：横向的 18px 偏移和网格对齐（20 - 12 + 10），七列宽度才和下面一模一样。
+              左右滑它=换周（三份并排，滑走一排进来一排），点某一格=看那天。 */}
+          {!cal && (
+            <div
+              onPointerDown={onStripDown}
+              onPointerMove={onStripMove}
+              onPointerUp={onStripUp}
+              onPointerCancel={onStripUp}
+              className="mt-1.5 -mx-3 px-2.5 [touch-action:pan-y]"
+            >
+              <div ref={stripBoxRef} className="-mx-1 overflow-hidden px-1">
+                <motion.div className="flex w-[300%] -ml-[100%] items-start" style={{ x: xs }}>
+                  {[week - 1, week, week + 1].map((w) => (
+                    <div key={w} className="w-1/3 flex-none">
+                      {w >= 1 && w <= sem.totalWeeks && (
+                        <WeekDays snap={snap} week={w} anchor={anchor} today={today} setAnchor={(d) => { if (!stripSwiped.current) setAnchor(d) }} />
+                      )}
+                    </div>
+                  ))}
+                </motion.div>
+              </div>
+            </div>
+          )}
         </StickyHead>
 
         <div className="mt-1 px-2">
@@ -958,28 +1174,26 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
             onPointerCancel={onUp}
             className="overflow-hidden rounded-[22px] bg-(--c-surface) px-1.5 pt-2.5 pb-4 [touch-action:pan-y]"
           >
-            {/* 相邻周在这层裁掉：每周自带 4px 内边，选中标记外扩的 4px 不被切 */}
-            <motion.div
-              key={week}
-              initial={swiped.current ? false : { opacity: 0, transform: `translateX(${dir * 28}px)` }}
-              animate={{ opacity: 1, transform: 'translateX(0px)' }}
-              transition={{ type: 'tween', ease: SWIPE_EASE, duration: 0.22 }}
-              className="-mx-1 overflow-hidden px-1"
-            >
-              <motion.div className="flex w-[300%] -ml-[100%] items-start" style={{ x }}>
+            {/* 相邻周在这层裁掉：每周自带 4px 内边，选中标记外扩的 4px 不被切。
+                key 用周号（不是槽位序号）：翻周时新旧 panes 有两周重叠，React 会把这两份
+                连同里面的卡片 DOM 一起挪过来复用，只新建真正新出现的那一周。
+                原来外层 motion.div 还有一个 key={week}，会把三份整棵卸载重建 —— 那才是 commit 帧的大头。
+                will-change 常驻（[style] 里那句）：按下才挂的话，整幅光栅正好落在手指刚动的那一帧——
+                低端平板上就是「按下去 300ms 没反应」。真机实测常驻把滑动帧 p95 从 50ms 拉到 36ms。 */}
+            <div ref={enterRef} className="-mx-1 overflow-hidden px-1">
+              <motion.div ref={trackRef} className="flex w-[300%] -ml-[100%] items-start" style={{ x, willChange: 'transform' }}>
                 {panes.map((w) => (
                   <div key={w} className="w-1/3 flex-none px-1">
-                    {w >= 1 && w <= sem.totalWeeks && (
+                    {w >= 1 && w <= sem.totalWeeks && (w === week || sides) && (
                       <WeekGrid
                         snap={snap}
                         week={w}
-                        anchor={anchor}
                         today={today}
                         now={now}
-                        setAnchor={setAnchor}
                         onPick={onPick}
                         onMenu={onMenu}
                         liftKey={liftKey}
+                        fillH={fillH}
                         gridRef={w === week ? gridRef : undefined}
                         onGeometry={w === week ? onGeometry : undefined}
                       />
@@ -987,7 +1201,7 @@ function WeekView({ snap, anchor, setAnchor, onPick, onMenu, onSearch, liftKey }
                   </div>
                 ))}
               </motion.div>
-            </motion.div>
+            </div>
           </div>
         </div>
       </div>
@@ -1302,6 +1516,10 @@ function ImportRunPage({ rule, initialText, initialOut, autoRun, overBrowser, sy
   const [stage, setStage] = useState<ImportStage>(initialOut ? 'preview' : 'input')
   const eduSync = useEduSync()
   const [keepLogin, setKeepLogin] = useState(!!eduSync?.enabled)
+  /* 正方 + 有账号密码：会话过期时能自己重新登录，不用等人工。存本机，退出登录会删 */
+  const [cred, setCred] = useState(() => ({ user: eduSync?.user ?? '', password: eduSync?.password ?? '' }))
+  /* 这个入口的学校是不是正方——只有正方能用账号密码在后台自己重登 */
+  const zfLoginable = !!syncSource && detectSystem(syncSource.school.url, syncSource.school.system) === 'zhengfang_new'
   /* 保持登录需要系统 WebView 支持多 Profile，不支持就不显示 */
   const [canKeep, setCanKeep] = useState(false)
   useEffect(() => {
@@ -1386,8 +1604,14 @@ function ImportRunPage({ rule, initialText, initialOut, autoRun, overBrowser, sy
       failed, diagnostics: pending.diagnostics,
     })
     if (syncSource && canKeep) {
-      if (keepLogin) enableEduSync(syncSource)
-      else if (eduSync) setEduSyncEnabled(false)
+      if (keepLogin) {
+        enableEduSync({
+          ...syncSource,
+          /* 只带填了的过去；留空表示沿用之前存的，不覆盖成空 */
+          user: zfLoginable ? cred.user.trim() || undefined : undefined,
+          password: zfLoginable ? cred.password || undefined : undefined,
+        })
+      } else if (eduSync) setEduSyncEnabled(false)
     }
     onDone()
   }
@@ -1523,6 +1747,39 @@ function ImportRunPage({ rule, initialText, initialOut, autoRun, overBrowser, sy
                   </div>
                 )}
 
+                {syncSource && canKeep && keepLogin && zfLoginable && (
+                  <div className="mt-2.5 overflow-hidden rounded-[16px] bg-(--c-surface)">
+                    <div className="flex items-center gap-3 px-4 pt-3 pb-2.5">
+                      <span className="w-[38px] flex-none text-[12.5px] font-medium text-(--c-ink4)">学号</span>
+                      <TextInput
+                        value={cred.user}
+                        onChange={(e) => setCred({ ...cred, user: e.target.value })}
+                        placeholder="学号 / 用户名"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        className="min-w-0 flex-1 text-[13px]"
+                      />
+                    </div>
+                    <div className="flex items-center gap-3 px-4 pb-3">
+                      <span className="w-[38px] flex-none text-[12.5px] font-medium text-(--c-ink4)">密码</span>
+                      <TextInput
+                        type="password"
+                        value={cred.password}
+                        onChange={(e) => setCred({ ...cred, password: e.target.value })}
+                        placeholder="教务系统密码"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        className="min-w-0 flex-1 text-[13px]"
+                      />
+                    </div>
+                    <div className="px-4 pb-3 text-[11.5px] leading-[1.5] font-medium text-(--c-ink4)">
+                      填了就不用等会话过期再来手动登录。只存在这台手机上，退出登录会删掉。
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-2.5 divide-y divide-(--c-surface2) overflow-hidden rounded-[16px] bg-(--c-surface)">
                   {pending.courses.map((nc) => (
                     <ParsedRow key={nc.course.identityKey} nc={nc} sem={target} />
@@ -1647,7 +1904,10 @@ function RuleEditorPage({ rule, onBack }: { rule: RuleManifest | null; onBack: (
 
 /* ---------------- 我的 ---------------- */
 
-type MePage = 'semester' | 'schedule' | 'history' | 'trash' | 'courses' | 'import' | 'share' | 'changes' | 'notif' | 'widget' | 'theme' | 'profile' | 'stats' | 'erase'
+type MePage = 'semester' | 'schedule' | 'history' | 'trash' | 'courses' | 'import' | 'share' | 'eduAuto' | 'changes' | 'widget' | 'theme' | 'profile' | 'stats' | 'erase'
+
+/* 「我的」页的分组：普通分组是一列可点的行，提醒分组原地展开，不跳页 */
+type MeGroup = { kind: 'rows'; title: string; rows: [string, string, MePage][] } | { kind: 'remind' }
 
 const WIDGET_LABEL: Record<WidgetStyle, string> = {
   today: '今日课程',
@@ -1656,41 +1916,50 @@ const WIDGET_LABEL: Record<WidgetStyle, string> = {
   week: '本周课表',
 }
 
-function MeView({ onPage }: { onPage: (p: MePage) => void }) {
+function MeView({ onPage, onPref, onCalendar }: { onPage: (p: MePage) => void; onPref: (k: PrefKey) => void; onCalendar: () => void }) {
   const state = useStore()
   const theme = useTheme()
   const sem = state.semester
   const trashCount = state.courses.filter((c) => c.removedByImport).length
   const live = state.courses.filter((c) => !c.removedByImport)
   const week = sem ? weekOf(sem, todayStr()) : 0
-  const homework = state.tasks.filter((t) => t.kind === 'homework')
+  /* 顶部三格：门课 / 每周节数 / 未完成待办。调整次数只在「记录」里看，这里换成能一眼判断忙不忙的指标 */
+  const weekly = weekPeriods(state)
+  const openTasks = openTasksOf(state)
+  const edu = useEduSync()
+  /* 自动更新那行的右侧摘要：没绑过、关着、按启动还是按小时 */
+  const eduLabel = !edu
+    ? '未设置'
+    : !edu.enabled
+      ? '已关闭'
+      : edu.mode === 'launch'
+        ? '每次启动'
+        : `每 ${edu.intervalHours} 小时`
 
-  const groups: [string, [string, string, MePage][]][] = [
-    ['课表', [
+  const groups: MeGroup[] = [
+    { kind: 'rows', title: '课表', rows: [
       ['学期', sem ? (semesterEnded(sem) ? `${sem.name}，已结束` : `${sem.name}，第 ${Math.max(0, Math.min(sem.totalWeeks, week))} / ${sem.totalWeeks} 周`) : '未设置', 'semester'],
       ['作息时间', '', 'schedule'],
       ['课程', `${live.length} 门`, 'courses'],
       ['导入课表', '', 'import'],
       ['分享课表', '', 'share'],
-    ]],
-    ['提醒', [
-      ['上课提醒', `课前 ${state.prefs.classLead} 分钟`, 'notif'],
-      ['作业提醒', taskLeadsText(state.prefs.taskLeads), 'notif'],
-    ]],
-    ['外观', [
+      ['自动更新', eduLabel, 'eduAuto'],
+    ] },
+    { kind: 'remind' },
+    { kind: 'rows', title: '外观', rows: [
       ['主题', THEME_LABEL[theme], 'theme'],
-    ]],
-    ['记录', [
+    ] },
+    { kind: 'rows', title: '记录', rows: [
       ['变更记录', `${state.changes.length + state.overrides.length} 条`, 'changes'],
       ['导入历史', `${state.batches.length} 次`, 'history'],
       ['回收站', trashCount > 0 ? `${trashCount} 门` : '空', 'trash'],
-    ]],
-    ['数据', [
+    ] },
+    { kind: 'rows', title: '数据', rows: [
       ['清除数据', '', 'erase'],
-    ]],
+    ] },
   ]
-  const avatar = usePhotoSrc(state.prefs.avatar, '/avatar.jpg')
-  const wall = usePhotoSrc(state.prefs.wall, '/wall.jpg')
+  const avatar = usePhotoSrc(state.prefs.avatar)
+  const wall = usePhotoSrc(state.prefs.wall)
 
   const meHero = useRef<HTMLDivElement>(null)
   const meHead = useRef<HTMLDivElement>(null)
@@ -1710,14 +1979,19 @@ function MeView({ onPage }: { onPage: (p: MePage) => void }) {
         </span>
       </div>
       <div className="relative flex-1 overflow-y-auto pb-[130px] [scrollbar-width:none]">
-        <div ref={meHero} className="relative h-[258px] overflow-hidden bg-[#5d6d55]">
+        {/* 横屏或矮屏（平板横放、手机横放）时头图按屏高收一档，否则一屏里全是背景图 */}
+        <div ref={meHero} className="relative h-[258px] overflow-hidden bg-(--c-bg) [@media(max-height:640px)]:h-[186px]">
           <button onClick={() => onPage('profile')} className="absolute inset-0 transition-opacity active:opacity-85">
-            <img src={wall} alt="" className="h-full w-full object-cover object-[50%_32%]" />
+            {wall ? <img src={wall} alt="" className="h-full w-full object-cover object-[50%_32%]" /> : <WallPlaceholder />}
           </button>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[150px] bg-gradient-to-t from-(--c-bg) via-(--c-bg)/70 to-transparent" />
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-[92px] bg-gradient-to-b from-black/25 to-transparent" />
+          {wall && <div className="pointer-events-none absolute inset-x-0 top-0 h-[92px] bg-gradient-to-b from-black/25 to-transparent" />}
           <button onClick={() => onPage('profile')} className="absolute inset-x-5 bottom-3 flex items-end text-left transition-opacity active:opacity-70">
-            <img src={avatar} alt="" className="h-[62px] w-[62px] flex-none rounded-full border-[1.5px] border-(--c-bg) bg-(--c-accent) object-cover" />
+            {avatar ? (
+              <img src={avatar} alt="" className="h-[62px] w-[62px] flex-none rounded-full border-[1.5px] border-(--c-bg) bg-(--c-accent) object-cover" />
+            ) : (
+              <AvatarPlaceholder size={62} />
+            )}
             <div className="mb-1 ml-3.5 flex-1">
               <div className="text-[19px] font-extrabold tracking-[-.02em] text-(--c-ink)">{state.prefs.name || sem?.name || '我的课表'}</div>
               <div className="mt-[3px] flex items-center gap-2.5 text-[12px] font-semibold text-(--c-ink3)">
@@ -1730,7 +2004,7 @@ function MeView({ onPage }: { onPage: (p: MePage) => void }) {
 
         <div className="px-5">
           <button onClick={() => onPage('stats')} className="flex w-full rounded-[18px] bg-(--c-surface) px-4 py-3.5 transition-opacity active:opacity-60">
-            {[[String(live.length), '门课'], [String(state.overrides.length), '次调整'], [String(homework.length), '项作业']].map(([n, l], i) => (
+            {[[String(live.length), '门课'], [String(weekly), '本周节数'], [String(openTasks), '项待办']].map(([n, l], i) => (
               <div key={l} className={`flex-1 ${i ? 'border-l border-(--c-surface2)' : ''}`}>
                 <div className="text-center text-[17px] font-extrabold tabular-nums text-(--c-ink)">{n}</div>
                 <div className="mt-0.5 text-center text-[11px] font-semibold text-(--c-ink4)">{l}</div>
@@ -1738,11 +2012,13 @@ function MeView({ onPage }: { onPage: (p: MePage) => void }) {
             ))}
           </button>
 
-          {groups.map(([g, rows]) => (
-            <div key={g} className="mt-5">
-              <div className="px-0.5 text-[12px] font-bold tracking-[-.01em] text-(--c-ink5)">{g}</div>
+          {groups.map((g) => (g.kind === 'remind' ? (
+            <RemindGroup key="remind" onPick={onPref} onPermission={onCalendar} />
+          ) : (
+            <div key={g.title} className="mt-5">
+              <div className="px-0.5 text-[12px] font-bold tracking-[-.01em] text-(--c-ink5)">{g.title}</div>
               <div className="mt-2 rounded-[18px] bg-(--c-surface) px-4">
-                {rows.map(([k, v, page], i) => (
+                {g.rows.map(([k, v, page], i) => (
                   <button
                     key={k}
                     onClick={() => onPage(page)}
@@ -1755,15 +2031,15 @@ function MeView({ onPage }: { onPage: (p: MePage) => void }) {
                 ))}
               </div>
             </div>
-          ))}
+          )))}
         </div>
       </div>
     </>
   )
 }
 
-/* 头像 / 背景：自选照片先用直接路径再换成可显示的，没选则用内置图 */
-function usePhotoSrc(path: string, fallback: string): string {
+/* 头像 / 背景：自选照片先用直接路径再换成可显示的；没选就返回空串，由调用处显示占位 */
+function usePhotoSrc(path: string): string {
   const [src, setSrc] = useState(() => (path ? photoSrc(path) : ''))
   useEffect(() => {
     if (!path) {
@@ -1777,11 +2053,46 @@ function usePhotoSrc(path: string, fallback: string): string {
       alive = false
     }
   }, [path])
-  return src || fallback
+  return src
+}
+
+/* 没设头像时的占位：主题色圆底 + 人形 */
+function AvatarPlaceholder({ size }: { size: number }) {
+  return (
+    <span
+      className="grid flex-none place-items-center rounded-full text-white"
+      style={{ width: size, height: size, background: 'var(--c-accent)', boxShadow: '0 0 0 1.5px var(--c-bg)' }}
+    >
+      <svg width={size * 0.52} height={size * 0.52} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        {ICON.user}
+      </svg>
+    </span>
+  )
+}
+
+/* 没设背景图时的占位：主题色到页面底的渐变 */
+function WallPlaceholder() {
+  return <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, var(--c-accent-soft), var(--c-bg) 72%)' }} />
 }
 
 const periodsOf = (r: SessionRule) => r.endPeriod - r.startPeriod + 1
 const fmtNum = (n: number) => String(Math.round(n * 10) / 10)
+
+/** 本周有几节课：按本周真正生效的规则数一遍，和课表上看到的那一屏对得上。
+ *  不用「整学期平均」——它会把只上前八周的课摊薄，和课表上的数字对不上，反而更像错数。
+ *  统计页和「我的」顶部共用这一份。 */
+function weekPeriods(state: State): number {
+  const sem = state.semester
+  if (!sem || sem.totalWeeks <= 0) return 0
+  const w = Math.max(1, Math.min(sem.totalWeeks, weekOf(sem, todayStr())))
+  const ids = new Set(state.courses.filter((c) => !c.removedByImport).map((c) => c.id))
+  let n = 0
+  for (const r of state.rules) if (ids.has(r.courseId) && maskHasWeek(r.weeksMask, w)) n += periodsOf(r)
+  return n
+}
+
+/** 还没做完的待办（作业 + 考试），做完就不再计入 */
+const openTasksOf = (state: State) => state.tasks.filter((t) => !t.done).length
 
 type PhotoTarget = 'avatar' | 'wall'
 
@@ -1796,8 +2107,8 @@ function CameraBadge({ className }: { className: string }) {
 /* 个人资料：顶部就是「我」页头图的缩影，点背景换背景、点头像换头像；已自定义时弹出「从相册选择 / 恢复默认」 */
 function ProfilePage({ onBack, onPick }: { onBack: () => void; onPick: (t: PhotoTarget) => void }) {
   const state = useStore()
-  const avatar = usePhotoSrc(state.prefs.avatar, '/avatar.jpg')
-  const wall = usePhotoSrc(state.prefs.wall, '/wall.jpg')
+  const avatar = usePhotoSrc(state.prefs.avatar)
+  const wall = usePhotoSrc(state.prefs.wall)
   const [menu, setMenu] = useState<PhotoTarget | null>(null)
   const tap = (t: PhotoTarget) => (state.prefs[t] ? setMenu(t) : onPick(t))
   const reset = (t: PhotoTarget) => {
@@ -1806,14 +2117,17 @@ function ProfilePage({ onBack, onPick }: { onBack: () => void; onPick: (t: Photo
   }
   return (
     <SubPage title="个人资料" onBack={onBack}>
-      <div className="relative h-[172px] overflow-hidden rounded-[18px] bg-[#5d6d55]">
+      <div className="relative h-[172px] overflow-hidden rounded-[18px] bg-(--c-bg)">
         <button onClick={() => tap('wall')} className="absolute inset-0 transition-opacity active:opacity-80">
-          <img src={wall} alt="" className="h-full w-full object-cover object-[50%_32%]" />
-          <div className="absolute inset-x-0 bottom-0 h-[96px] bg-gradient-to-t from-black/50 to-transparent" />
+          {wall ? <img src={wall} alt="" className="h-full w-full object-cover object-[50%_32%]" /> : <WallPlaceholder />}
           <CameraBadge className="absolute top-3 right-3 h-[28px] w-[28px] bg-black/35 text-white backdrop-blur-md" />
         </button>
         <button onClick={() => tap('avatar')} className="absolute bottom-4 left-4 h-[64px] w-[64px] transition-transform duration-150 active:scale-[.95]">
-          <img src={avatar} alt="" className="h-full w-full rounded-full border-2 border-white/90 object-cover" />
+          {avatar ? (
+            <img src={avatar} alt="" className="h-full w-full rounded-full border-2 border-white/90 object-cover" />
+          ) : (
+            <AvatarPlaceholder size={64} />
+          )}
           <CameraBadge className="absolute -right-0.5 -bottom-0.5 h-[24px] w-[24px] bg-(--c-ink) text-(--c-bg) ring-2 ring-white" />
         </button>
       </div>
@@ -1865,8 +2179,7 @@ function StatsPage({ onBack, onCourse, onChanges, onTodo }: { onBack: () => void
     const leave = state.overrides.filter((o) => o.kind === 'leave' && ruleCourse.get(o.ruleId) === c.id).length
     return { c, total, done, weekly: weeks.size ? Math.round(total / weeks.size) : 0, leave }
   })
-  const totalPeriods = rows.reduce((a, r) => a + r.total, 0)
-  const weekly = sem && sem.totalWeeks > 0 ? Math.round(totalPeriods / sem.totalWeeks) : 0
+  const weekly = weekPeriods(state)
   const week = sem ? Math.min(Math.max(weekOf(sem, today), 0), sem.totalWeeks) : 0
 
   const byCategory = new Map<string, typeof rows>()
@@ -1878,7 +2191,7 @@ function StatsPage({ onBack, onCourse, onChanges, onTodo }: { onBack: () => void
   const donePeriods = rows.reduce((a, r) => a + r.done, 0)
   const facts = [
     live.length > 0 ? `${live.length} 门课` : '',
-    weekly > 0 ? `每周 ${weekly} 节` : '',
+    weekly > 0 ? `本周 ${weekly} 节` : '',
     donePeriods > 0 ? `已上 ${donePeriods} 节` : '',
   ].filter(Boolean)
 
@@ -2143,9 +2456,41 @@ function SemesterPickSheet({ title, action, options, onPick, onClose }: {
   )
 }
 
+/* 导出一个学期的课表：分享给别的应用，或直接存进本机「下载」 */
+function ExportSheet({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
+  const save = async () => {
+    try {
+      const r = await saveIcs(snap)
+      if (r) nativeToast(`已保存到${r.path}`)
+    } catch (e) {
+      nativeToast(e instanceof Error && e.message ? `保存失败：${e.message}` : '保存失败')
+    }
+  }
+  return (
+    <ActionSheet
+      title={`导出「${snap.semester.name}」`}
+      onClose={onClose}
+      groups={[[
+        {
+          title: '分享到其他应用',
+          icon: <><path d="M12 15.5V4.2" /><path d="m7.6 8.4 4.4-4.4 4.4 4.4" /><path d="M5 14.6v3.6A1.8 1.8 0 0 0 6.8 20h10.4a1.8 1.8 0 0 0 1.8-1.8v-3.6" /></>,
+          onClick: () => { void shareIcs(snap) },
+        },
+        {
+          title: '保存到本机',
+          value: '本设备的Download文件夹',
+          icon: <><path d="M12 4.2v11.3" /><path d="m7.6 11.4 4.4 4.4 4.4-4.4" /><path d="M5 19.8h14" /></>,
+          onClick: () => { void save() },
+        },
+      ]]}
+    />
+  )
+}
+
 /* 往期学期：只读内页，课程列表、底部分享；删除走和规则页一样的红色行 */
 function ArchivePage({ a, onBack }: { a: SemesterArchive; onBack: () => void }) {
   const courses = a.courses.filter((c) => !c.hidden && !c.removedByImport)
+  const [exporting, setExporting] = useState(false)
   const remove = async () => {
     const ok = await nativeConfirm({ title: `删除「${a.semester.name}」`, message: `${courses.length} 门课一起删除，不可恢复`, ok: '删除' })
     if (!ok) return
@@ -2166,59 +2511,14 @@ function ArchivePage({ a, onBack }: { a: SemesterArchive; onBack: () => void }) 
         </div>
       </div>
       <div className="flex-none px-5 pt-2 pb-[max(22px,env(safe-area-inset-bottom))]">
-        <PrimaryButton onClick={() => void shareIcs(a)}>分享课表</PrimaryButton>
+        <PrimaryButton onClick={() => setExporting(true)}>分享课表</PrimaryButton>
       </div>
+      {exporting && <ExportSheet snap={a} onClose={() => setExporting(false)} />}
     </Page>
   )
 }
 
-/** 学期页的自动更新组：开关与状态、立即更新、退出登录；没开过不显示 */
-function EduSyncGroup({ onLogin }: { onLogin: (school: School) => void }) {
-  const s = useEduSync()
-  const [busy, setBusy] = useState(eduSyncing)
-  if (!s) return null
-  const status = statusText(s)
-  const update = async () => {
-    if (busy) return
-    setBusy(true)
-    try {
-      const o = await syncNow()
-      haptic(o.result === 'ok' || o.result === 'nochange' ? 'success' : 'error')
-      nativeToast(outcomeText(o))
-    } finally {
-      setBusy(false)
-    }
-  }
-  const logout = async () => {
-    const ok = await nativeConfirm({ title: '退出登录', message: `清除${s.school.name}的登录会话，关闭自动更新`, ok: '退出' })
-    if (!ok) return
-    await logoutEduSync()
-    haptic('warning')
-    nativeToast('已退出登录')
-  }
-  return (
-    <>
-      <div className="mt-7 mb-2 px-1 text-[12.5px] font-semibold text-(--c-ink4)">自动更新</div>
-      <div className="divide-y divide-(--c-surface2) overflow-hidden rounded-[16px] bg-(--c-surface)">
-        <div className="flex items-center px-4 py-3.5">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[14px] font-bold">{s.school.name}</div>
-            <div className={`mt-0.5 text-[12px] font-medium ${status.danger ? 'text-(--c-danger)' : 'text-(--c-ink4)'}`}>{status.text}</div>
-          </div>
-          <Switch on={s.enabled} onChange={setEduSyncEnabled} />
-        </div>
-        {s.lastResult === 'expired' ? (
-          <Row title="重新登录" onClick={() => onLogin(s.school)} />
-        ) : (
-          <Row title="立即更新" onClick={() => void update()} right={busy ? <Loader className="ml-3 text-(--c-ink4)" /> : <span />} />
-        )}
-        <Row title="退出登录" danger onClick={() => void logout()} right={<span />} />
-      </div>
-    </>
-  )
-}
-
-function SemesterSettings({ sem, onBack, onNew, onArchive, onLogin }: { sem: Semester; onBack: () => void; onNew: () => void; onArchive: (id: string) => void; onLogin: (school: School) => void }) {
+function SemesterSettings({ sem, onBack, onNew, onArchive }: { sem: Semester; onBack: () => void; onNew: () => void; onArchive: (id: string) => void }) {
   const state = useStore()
   const [name, setName] = useState(sem.name)
   const [date, setDate] = useState(sem.startDate)
@@ -2247,8 +2547,6 @@ function SemesterSettings({ sem, onBack, onNew, onArchive, onLogin }: { sem: Sem
       <div className="mt-2.5 overflow-hidden rounded-[16px] bg-(--c-surface)">
         <Row title="开始新学期" desc={ended ? "当前学期移入往期" : undefined} onClick={onNew} />
       </div>
-
-      <EduSyncGroup onLogin={onLogin} />
 
       {archives.length > 0 && (
         <>
@@ -2420,8 +2718,12 @@ type Route =
   | { k: 'importRun'; ruleId: string; text?: string; auto?: boolean }
   | { k: 'aiImport'; attach?: string }
   | { k: 'eduSchool' }
+  /** 教务自动更新的设置页；url 是刚选完学校带回来的网址，不传就用已存的 */
+  | { k: 'eduAuto'; url?: string }
+  | { k: 'eduAutoSchool' }
   | { k: 'eduBrowser'; school: School }
-  | { k: 'eduPreview'; out: RuleOutput; src: EduSyncSource }
+  /** src 只有「从教务系统导入」那条路有：记下学校与当时所在的课表页，供自动更新复用 */
+  | { k: 'eduPreview'; out: RuleOutput; src?: EduSyncSource }
   | { k: 'eduFail'; info: EduFailInfo }
   | { k: 'rule'; rule: RuleManifest | null }
   | { k: 'semester' }
@@ -2431,7 +2733,6 @@ type Route =
   | { k: 'history' }
   | { k: 'trash' }
   | { k: 'courses' }
-  | { k: 'notif' }
   | { k: 'calendarIntro' }
   | { k: 'notifPick'; pref: PrefKey }
   | { k: 'widget' }
@@ -2488,11 +2789,13 @@ export default function RealApp() {
   }
   const [searching, setSearching] = useState(false)
   const [sharing, setSharing] = useState(false)
-  /* 导出：有往期学期时先选学期，否则直接分享当前 */
+  /* 选完学期（或只有一个学期）后弹出「分享 / 保存到本机」 */
+  const [exporting, setExporting] = useState<Snapshot | null>(null)
+  /* 导出：有往期学期时先选学期，选完再问分享还是保存 */
   const share = () => {
     if (!store.state.semester) { nativeToast('先设置学期'); return }
     if (store.state.archives.length > 0) setSharing(true)
-    else void shareIcs()
+    else setExporting(store.snapshot())
   }
   const [compose, setCompose] = useState<{ courseId?: string } | null>(null)
   const [, tick] = useState(0)
@@ -2512,6 +2815,10 @@ export default function RealApp() {
     }
     run()
     const off = store.subscribe(run)
+    /* 冷启动：按设置决定要不要更新一次（「每次开启 APP 时更新」就走这里） */
+    void syncOnLaunch()?.then((o) => {
+      if (o.result === 'ok' || o.note) nativeToast(outcomeText(o))
+    })
     const onResume = CapApp.addListener('resume', () => {
       void syncCalendar()
       void syncWidgets()
@@ -2641,11 +2948,12 @@ export default function RealApp() {
     setOnboarded(true)
   }, [onboardUnder, stack.length])
 
-  /* 有课表、还没拿到日历权限：每次启动推一次「加进手机日历」，拿到后全自动 */
+  /* 有课表、开了至少一类提醒、还没拿到日历权限：启动时推一次「加进手机日历」。
+     两类提醒都关着时完全不碰权限，也就不会弹授权页。 */
   const calAsked = useRef(false)
   useEffect(() => {
     if (!onboarded || onboardUnder || stack.length > 0 || !calendarSupported() || calAsked.current) return
-    if (state.courses.length === 0) return
+    if (state.courses.length === 0 || !remindEnabled(state.prefs)) return
     let alive = true
     void calendarPermission().then((p) => {
       if (!alive) return
@@ -2654,7 +2962,7 @@ export default function RealApp() {
       else setStack((s) => (s.length === 0 ? [{ k: 'calendarIntro' }] : s))
     })
     return () => { alive = false }
-  }, [onboarded, onboardUnder, stack.length, state.courses.length])
+  }, [onboarded, onboardUnder, stack.length, state.courses.length, state.prefs.classRemind, state.prefs.taskRemind])
 
   /* 系统返回：先关浮层，再退内页，再回今天；引导期间退上一步 */
   const backRef = useRef<() => boolean>(() => false)
@@ -2781,6 +3089,10 @@ export default function RealApp() {
         return <AiImportPage key={key} attach={r.attach} onBack={pop} onNext={(text) => push({ k: 'importRun', ruleId: 'builtin-json', text })} />
       case 'eduSchool':
         return <EduSchoolPage key={key} onBack={pop} onOpen={(school) => push({ k: 'eduBrowser', school })} />
+      case 'eduAuto':
+        return <EduAutoPage key={key} initialUrl={r.url} onBack={pop} onPickSchool={() => push({ k: 'eduAutoSchool' })} />
+      case 'eduAutoSchool':
+        return <EduSchoolPage key={key} onBack={pop} onOpen={(school) => replaceTop({ k: 'eduAuto', url: school.url })} />
       case 'eduBrowser':
         return (
           <EduBrowserPage
@@ -2803,7 +3115,7 @@ export default function RealApp() {
       case 'rule':
         return <RuleEditorPage key={key} rule={r.rule} onBack={pop} />
       case 'semester':
-        return <SemesterSettings key={key} sem={snap.semester} onBack={pop} onNew={() => push({ k: 'newSemester' })} onArchive={(id) => push({ k: 'archive', id })} onLogin={(school) => push({ k: 'eduBrowser', school })} />
+        return <SemesterSettings key={key} sem={snap.semester} onBack={pop} onNew={() => push({ k: 'newSemester' })} onArchive={(id) => push({ k: 'archive', id })} />
       case 'archive': {
         const a = state.archives.find((x) => x.semester.id === r.id)
         return a ? <ArchivePage key={key} a={a} onBack={pop} /> : null
@@ -2816,8 +3128,6 @@ export default function RealApp() {
         return <HistoryPage key={key} onBack={pop} />
       case 'trash':
         return <TrashPage key={key} onBack={pop} />
-      case 'notif':
-        return <NotifPrefPage key={key} onBack={pop} onPick={(pref) => push({ k: 'notifPick', pref })} />
       case 'calendarIntro':
         return <CalendarIntroPage key={key} onDone={pop} />
       case 'notifPick':
@@ -2868,67 +3178,74 @@ export default function RealApp() {
       : null
     : null
 
+  /* 四个 Tab「常驻 + 只切可见性」试过，在这台设备上是负收益：
+     切走的面板无论用 opacity:0 / opacity:0.01 / 仅被遮挡，合成器都会把它的栅格结果丢掉
+     （实测：藏 20s 再显示，仍要一次 150ms 的整页重绘；opacity 0.02→1 却是 0 帧）。
+     结果就是「没省下光栅，反而多挂三棵 DOM、多三份羽化模糊层」，切页从 ~40ms 掉到 53–97ms。
+     所以这里仍然一次只挂一个面板；能省的只有那层 160ms 的淡入。 */
+  const viewOf = (i: number) =>
+      i === 0 ? (
+        <TodayView
+          snap={snap}
+          anchor={anchor}
+          setAnchor={setAnchor}
+          onPick={openOccurrence}
+          onMenu={(o, a, el) => setMenu({ occ: o, anchor: a, ghost: { el, rect: a, radius: 16, scale: 1.03, bg: 'var(--c-surface)' } })}
+          liftKey={menu?.occ.key}
+          onSearch={() => setSearching(true)}
+          onImport={() => push({ k: 'import' })}
+          onManual={() => push({ k: 'manual' })}
+          onSemester={() => push({ k: 'semester' })}
+          onNewSemester={() => push({ k: 'newSemester' })}
+          onCapture={openCapture}
+        />
+      ) : i === 1 ? (
+        <WeekView
+          snap={snap}
+          anchor={weekAnchor}
+          setAnchor={setWeekAnchor}
+          onPick={openOccurrence}
+          onMenu={(o, a, el) => setMenu({ occ: o, anchor: a, ghost: { el, rect: a, color: o.color, radius: 9, scale: 1.06, overhang: true } })}
+          liftKey={menu?.occ.key}
+          onSearch={() => setSearching(true)}
+        />
+      ) : i === 2 ? (
+        <TodoView
+          snap={snap}
+          composing={compose != null && compose.courseId == null}
+          onOpen={(t) => push({ k: 'todoDetail', task: t })}
+          onCamera={() => push({ k: 'todoCamera' })}
+          onText={() => setCompose({})}
+        />
+      ) : (
+        <MeView
+          onPage={(p) => { if (p === 'share') share(); else push({ k: p } as Route) }}
+          onPref={(pref) => push({ k: 'notifPick', pref })}
+          onCalendar={() => push({ k: 'calendarIntro' })}
+        />
+      )
+
   return (
     <Shell tab={tab} onTab={(i) => { setStack([]); setTab(i) }}>
-      <AnimatePresence mode="popLayout" initial={false}>
-        <motion.div
-          key={tab}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0, transition: { duration: 0.1 } }}
-          transition={{ duration: 0.16, ease: 'easeOut' }}
-          data-veil-host
-          className="relative flex flex-1 flex-col overflow-hidden"
-        >
-          {tab === 0 && (
-            <TodayView
-              snap={snap}
-              anchor={anchor}
-              setAnchor={setAnchor}
-              onPick={openOccurrence}
-              onMenu={(o, a, el) => setMenu({ occ: o, anchor: a, ghost: { el, rect: a, radius: 16, scale: 1.03, bg: 'var(--c-surface)' } })}
-              liftKey={menu?.occ.key}
-              onSearch={() => setSearching(true)}
-              onImport={() => push({ k: 'import' })}
-              onManual={() => push({ k: 'manual' })}
-              onSemester={() => push({ k: 'semester' })}
-              onNewSemester={() => push({ k: 'newSemester' })}
-              onCapture={openCapture}
-            />
-          )}
-          {tab === 1 && (
-            <WeekView
-              snap={snap}
-              anchor={weekAnchor}
-              setAnchor={setWeekAnchor}
-              onPick={openOccurrence}
-              onMenu={(o, a, el) => setMenu({ occ: o, anchor: a, ghost: { el, rect: a, color: o.color, radius: 9, scale: 1.06, overhang: true } })}
-              liftKey={menu?.occ.key}
-              onSearch={() => setSearching(true)}
-            />
-          )}
-          {tab === 2 && (
-            <TodoView
-              snap={snap}
-              composing={compose != null && compose.courseId == null}
-              onOpen={(t) => push({ k: 'todoDetail', task: t })}
-              onCamera={() => push({ k: 'todoCamera' })}
-              onText={() => setCompose({})}
-            />
-          )}
-          {tab === 3 && <MeView onPage={(p) => { if (p === 'share') share(); else push({ k: p } as Route) }} />}
-        </motion.div>
-      </AnimatePresence>
+      {/* 不用 AnimatePresence 的 popLayout：它要把正在退场的整棵子树做一次布局投影测量，
+          大纲视图正好是最重的那棵（真机采样：一次切页 2888 次 getBoundingClientRect）。
+          也不再给整层做淡入：新内容第一帧就要整页光栅，再叠一层 160ms 的透明度动画，
+          只会让这段昂贵的光栅在动画期间重复提交。 */}
+      <div key={tab} data-veil-host className="relative flex flex-1 flex-col overflow-hidden">
+        {viewOf(tab)}
+      </div>
 
       {sharing && snap && (
         <SemesterPickSheet
-          title="分享哪个学期？"
-          action="分享"
+          title="导出哪个学期？"
+          action="下一步"
           options={[snap, ...[...store.state.archives].reverse()]}
-          onPick={(s) => void shareIcs(s)}
+          onPick={(s) => setExporting(s)}
           onClose={() => setSharing(false)}
         />
       )}
+
+      {exporting && <ExportSheet snap={exporting} onClose={() => setExporting(null)} />}
 
       {/* 搜索：盖在 Tab 上的浮层（淡入带一点上浮），位于内页之下：从搜索点进课程再返回，回到的是搜索 */}
       <AnimatePresence>
@@ -2996,7 +3313,7 @@ export default function RealApp() {
   }
 
   return (
-    <div ref={rootRef} className="relative mx-auto h-dvh w-full max-w-[430px] overflow-hidden bg-(--c-bg)">
+    <div ref={rootRef} className="shell-w relative h-dvh overflow-hidden bg-(--c-bg)">
       {renderApp(shellSnap)}
       <AnimatePresence initial={false}>
         {showOnboard && (

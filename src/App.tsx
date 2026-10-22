@@ -1713,12 +1713,11 @@ function ProfileScreen() {
       <div className="flex-1 overflow-hidden pt-12">
         <SubHead title="个人资料" />
         <div className="mt-6 px-5">
-          <div className="relative h-[172px] overflow-hidden rounded-[18px] bg-[#5d6d55]">
-            <img src="/wall.jpg" alt="" className="h-full w-full object-cover object-[50%_32%]" />
-            <div className="absolute inset-x-0 bottom-0 h-[96px] bg-gradient-to-t from-black/50 to-transparent" />
+          <div className="relative h-[172px] overflow-hidden rounded-[18px] bg-[#2b303a]">
+            <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, #454d5c, #1b1f27)' }} />
             <CamBadge className="absolute top-3 right-3 h-[28px] w-[28px] bg-black/35 text-white backdrop-blur-md" />
             <div className="absolute bottom-4 left-4 h-[64px] w-[64px]">
-              <img src="/avatar.jpg" alt="" className="h-full w-full rounded-full border-2 border-white/90 object-cover" />
+              <span className="block h-full w-full rounded-full border-2 border-white/90 bg-white/15" />
               <CamBadge className="absolute -right-0.5 -bottom-0.5 h-[24px] w-[24px] bg-(--c-ink) text-(--c-bg) ring-2 ring-white" />
             </div>
           </div>
@@ -1822,7 +1821,7 @@ function MeScreen() {
     <Phone>
       <div className="flex-1 overflow-hidden">
         <div className="relative h-[258px]">
-          <img src="/wall.jpg" alt="" className="absolute inset-0 h-full w-full object-cover object-[50%_32%]" />
+          <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, #454d5c, #1b1f27)' }} />
           <div className="absolute inset-x-0 bottom-0 h-[150px] bg-(--c-fade-photo)" />
           <div className="absolute inset-x-0 top-0 h-[92px] bg-gradient-to-b from-black/25 to-transparent" />
           <div className="absolute top-12 right-5 left-5">
@@ -1939,7 +1938,7 @@ function NotifCard({ n }: { n: Notif }) {
 function LockScreen() {
   return (
     <Phone>
-      <img src="/wall.jpg" alt="" className="absolute inset-0 h-full w-full object-cover object-[50%_28%]" />
+      <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, #454d5c, #1b1f27)' }} />
       <div className="absolute inset-0 bg-[#0E1116]/45 backdrop-blur-[2px]" />
       <div className="relative flex-1 px-3.5 pt-12">
         <div className="text-center text-white">
@@ -2041,13 +2040,33 @@ function ScheduleScreen({ overlay }: { overlay?: React.ReactNode }) {
         <div className="mt-6 px-5">
           <div className="rounded-[18px] bg-(--c-surface) px-4">
             <div className="flex items-center py-3">
-              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">总节数</span>
-              <Stepper value={rows.length} unit="节" />
+              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">一天分几段</span>
+              <span className="flex gap-1.5">
+                <span className="rounded-[9px] bg-(--c-surface) px-2.5 py-[6px] text-[12px] font-bold text-(--c-ink3)">2 段</span>
+                <span className="rounded-[9px] bg-(--c-accent-soft) px-2.5 py-[6px] text-[12px] font-bold text-(--c-accent)">3 段</span>
+              </span>
             </div>
+            <div className="pb-3 text-[12px] leading-[1.6] font-medium text-(--c-ink4)">上午 · 下午 · 晚上，段与段之间就是午休和晚饭</div>
             <div className="flex items-center border-t border-(--c-line2) py-3">
-              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">标准时长</span>
+              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">每节时长</span>
               <Stepper value={SCHED_DUR} unit="分" />
             </div>
+          </div>
+
+          <div className="mt-3 rounded-[18px] bg-(--c-surface) px-4">
+            <div className="flex items-center pt-3 pb-1 text-[11px] font-semibold text-(--c-ink5)">
+              <span className="w-[42px] flex-none" />
+              <span className="flex-1">每段第 1 节开始</span>
+              <span>节数</span>
+            </div>
+            {([['上午', 480, 4], ['下午', 840, 4], ['晚上', 1140, 4]] as [string, number, number][]).map(([name, at, n]) => (
+              <div key={name} className="flex items-center border-t border-(--c-line2) py-2.5">
+                <span className="w-[42px] flex-none text-[13px] font-bold text-(--c-ink)">{name}</span>
+                <span className="rounded-[10px] bg-(--c-surface2) px-3 py-1.5 text-[15px] font-bold tabular-nums text-(--c-ink)">{hm(at)}</span>
+                <span className="flex-1" />
+                <Stepper value={n} unit="节" />
+              </div>
+            ))}
           </div>
 
           <div className="mt-5 flex items-baseline px-0.5">
@@ -2099,53 +2118,72 @@ function ScheduleScreen({ overlay }: { overlay?: React.ReactNode }) {
   )
 }
 
-/* 引导第 2 步：三个数生成整天作息，午休/晚饭自动跳；细调去「我的 · 作息时间」 */
+/* 引导第 2 步：一天分几段，每段定「第 1 节开始」与节数；段与段之间就是午休、晚饭。
+   细调去「我的 · 作息时间」 */
 function OnboardScheduleScreen() {
-  const n = 14
-  const dur = 45
-  const gap = 10
-  /* 午休/晚饭截止先按紧的排，最后一节拖过 23:00 再放宽（与 domain/schedule.generateGrid 同步） */
-  let rows: [number, number][] = []
-  for (const [noon, dusk] of [[12 * 60, 18 * 60], [12 * 60 + 30, 18 * 60 + 30], [Infinity, Infinity]]) {
-    rows = []
-    let s = 480
-    for (let i = 0; i < n; i++) {
-      const e = s + dur
-      rows.push([s, e])
-      s = e + gap
-      if (s < 14 * 60 && s + dur > noon) s = 14 * 60
-      else if (s >= 14 * 60 && s < 19 * 60 && s + dur > dusk) s = 19 * 60
-    }
-    if (rows[n - 1][1] <= 23 * 60) break
-  }
+  const segs: [string, number, number][] = [['上午', 480, 4], ['下午', 840, 4], ['晚上', 1140, 2]]
+  const breaks: [number, string, string][] = [[4, '午休', '2 小时 30 分'], [8, '晚饭', '1 小时 30 分']]
+  const cells: [number, number][] = []
+  segs.forEach(([, start, count]) => {
+    for (let i = 0; i < count; i++) cells.push([start + i * (SCHED_DUR + 10), start + i * (SCHED_DUR + 10) + SCHED_DUR])
+  })
+  const list: ({ kind: 'p'; i: number; a: number; b: number } | { kind: 'b'; name: string; gap: string })[] = []
+  cells.forEach(([a, b], i) => {
+    list.push({ kind: 'p', i: i + 1, a, b })
+    const g = breaks.find(([after]) => after === i + 1)
+    if (g) list.push({ kind: 'b', name: g[1], gap: g[2] })
+  })
   return (
     <Phone>
       <div className="flex flex-1 flex-col pt-12">
-        <SubHead title="作息时间" sub={`${n} 节 · ${hm(rows[0][0])} – ${hm(rows[n - 1][1])}`} />
+        <SubHead title="作息时间" sub={`${cells.length} 节 · ${hm(cells[0][0])} – ${hm(cells[cells.length - 1][1])}`} />
         <div className="mt-6 px-5">
           <div className="rounded-[18px] bg-(--c-surface) px-4">
             <div className="flex items-center py-3">
-              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">每天节数</span>
-              <Stepper value={n} unit="节" />
+              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">一天分几段</span>
+              <span className="flex gap-1.5">
+                <span className="rounded-[9px] bg-(--c-surface) px-2.5 py-[6px] text-[12px] font-bold text-(--c-ink3)">2 段</span>
+                <span className="rounded-[9px] bg-(--c-accent-soft) px-2.5 py-[6px] text-[12px] font-bold text-(--c-accent)">3 段</span>
+              </span>
             </div>
+            <div className="pb-3 text-[12px] leading-[1.6] font-medium text-(--c-ink4)">上午 · 下午 · 晚上，段与段之间就是午休和晚饭</div>
             <div className="flex items-center border-t border-(--c-line2) py-3">
               <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">每节时长</span>
-              <Stepper value={dur} unit="分" />
-            </div>
-            <div className="flex items-center border-t border-(--c-line2) py-3">
-              <span className="flex-1 text-[14px] font-semibold text-(--c-ink)">第 1 节开始</span>
-              <span className="rounded-[10px] bg-(--c-surface2) px-3 py-1.5 text-[15px] font-bold tabular-nums text-(--c-ink)">08:00</span>
+              <Stepper value={SCHED_DUR} unit="分" />
             </div>
           </div>
-          <div className="mt-5 grid grid-cols-2 gap-x-4 rounded-[18px] bg-(--c-surface) px-4 py-2">
-            {rows.map(([a, b], i) => (
-              <div key={i} className={`flex items-center py-[7px] ${i >= 2 ? 'border-t border-(--c-line2)' : ''}`}>
-                <span className="w-[24px] text-[12px] font-bold tabular-nums text-(--c-ink5)">{i + 1}</span>
-                <span className="text-[13px] font-semibold tabular-nums text-(--c-ink)">{hm(a)}</span>
-                <span className="mx-1.5 text-[12px] text-(--c-ink5)">–</span>
-                <span className="text-[13px] font-medium tabular-nums text-(--c-ink4)">{hm(b)}</span>
+          <div className="mt-3 rounded-[18px] bg-(--c-surface) px-4">
+            <div className="flex items-center pt-3 pb-1 text-[11px] font-semibold text-(--c-ink5)">
+              <span className="w-[42px] flex-none" />
+              <span className="flex-1">每段第 1 节开始</span>
+              <span>节数</span>
+            </div>
+            {segs.map(([name, at, n]) => (
+              <div key={name} className="flex items-center border-t border-(--c-line2) py-2.5">
+                <span className="w-[42px] flex-none text-[13px] font-bold text-(--c-ink)">{name}</span>
+                <span className="rounded-[10px] bg-(--c-surface2) px-3 py-1.5 text-[15px] font-bold tabular-nums text-(--c-ink)">{hm(at)}</span>
+                <span className="flex-1" />
+                <Stepper value={n} unit="节" />
               </div>
             ))}
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-x-4 rounded-[18px] bg-(--c-surface) px-4 py-2">
+            {list.map((it, k) =>
+              it.kind === 'b' ? (
+                <div key={`b${k}`} className="col-span-2 flex items-center py-[7px]">
+                  <span className="h-px flex-1 border-t border-dashed border-(--c-line)" />
+                  <span className="px-2 text-[11px] font-semibold tabular-nums text-(--c-ink4)">{it.name} {it.gap}</span>
+                  <span className="h-px flex-1 border-t border-dashed border-(--c-line)" />
+                </div>
+              ) : (
+                <div key={it.i} className="flex items-center py-[7px]">
+                  <span className="w-[24px] text-[12px] font-bold tabular-nums text-(--c-ink5)">{it.i}</span>
+                  <span className="text-[13px] font-semibold tabular-nums text-(--c-ink)">{hm(it.a)}</span>
+                  <span className="mx-1.5 text-[12px] text-(--c-ink5)">–</span>
+                  <span className="text-[13px] font-medium tabular-nums text-(--c-ink4)">{hm(it.b)}</span>
+                </div>
+              ),
+            )}
           </div>
         </div>
         <div className="mt-auto" />
@@ -2263,7 +2301,7 @@ function WRow({ name, time, loc, color, big = true, badge }: { name: string; tim
 function WidgetScreen() {
   return (
     <Phone>
-      <img src="/wall.jpg" alt="" className="absolute inset-0 h-full w-full object-cover object-[50%_28%]" />
+      <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, #454d5c, #1b1f27)' }} />
       <div className="absolute inset-0 bg-[#0E1116]/25" />
       <div className="relative flex-1 px-4 pt-10">
         <div className="flex gap-3.5">
@@ -2353,7 +2391,7 @@ function WidgetScreen() {
 function WidgetScreen2() {
   return (
     <Phone>
-      <img src="/wall.jpg" alt="" className="absolute inset-0 h-full w-full object-cover object-[50%_28%]" />
+      <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, #454d5c, #1b1f27)' }} />
       <div className="absolute inset-0 bg-[#0E1116]/25" />
       <div className="relative flex-1 px-4 pt-10">
         <div className="flex gap-3.5">

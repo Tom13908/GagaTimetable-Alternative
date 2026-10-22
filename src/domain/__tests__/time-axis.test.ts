@@ -56,24 +56,43 @@ describe('buildAxis', () => {
 
 describe('rowHeights', () => {
   const w = 40
-  it('空行取下限，单节满卡取上限', () => {
+  it('行高全表统一：所有节一样高，取各行里最高的需求', () => {
     const rows = rowHeights(grid, [{ start: 600, end: 645, name: '概率论与数理统计', loc: '计科楼A302' }], w)
     const axis = buildAxis(grid, undefined, rows)
     const period = (i: number) => axis.segs.find((s) => s.kind === 'period' && s.index === i)!
-    expect(period(1).y1 - period(1).y0).toBe(AXIS_ROW_MIN)
     const need = cardNeed(w, '概率论与数理统计', '计科楼A302')
-    expect(period(3).y1 - period(3).y0).toBe(Math.ceil(need))
-    expect(Math.ceil(need)).toBeLessThanOrEqual(AXIS_ROW)
+    /* 单节最多给到 AXIS_ROW；窄列里排不下就靠省略号，行高不再无上限地涨 */
+    const want = Math.min(AXIS_ROW, Math.ceil(need))
+    for (let i = 1; i <= 10; i++) expect(period(i).y1 - period(i).y0).toBe(want)
     expect(need).toBeGreaterThan(AXIS_ROW - 2)
+    /* 空行不再缩到 AXIS_ROW_MIN —— 缩了就会让挨着空行的两节卡比别处小一圈 */
+    expect(period(1).y1 - period(1).y0).toBeGreaterThan(AXIS_ROW_MIN)
+  })
+
+  it('同样两节的课，挨着空行和挨着满卡行必须一样大', () => {
+    const cards = [
+      { start: 480, end: 580, name: '形势与政策', loc: '(罗文)2教301' },
+      { start: 600, end: 645, name: '概率论与数理统计', loc: '计科楼A302' },
+      { start: 840, end: 940, name: '移动应用开发', loc: '(罗文)实307' },
+    ]
+    const axis = buildAxis(grid, undefined, rowHeights(grid, cards, w))
+    const span = (a: number, b: number) => axis.y(b) - axis.y(a)
+    const one = span(600, 645)
+    expect(span(480, 525)).toBe(one)
+    /* 4–5 节旁边是空行，6–7 节旁边坐满了课：两张卡必须等高 */
+    expect(span(480, 580)).toBe(span(840, 940))
+    expect(span(480, 580)).toBe(2 * one + AXIS_GAP)
   })
 
   it('连堂课把需求摊到各节，后半节不被擑高，卡片总高仍够用', () => {
     const card = { start: 480, end: 580, name: '高等数学A', loc: '理教3楼 204' }
     const rows = rowHeights(grid, [card], w)
     expect(rows.get(1)).toBe(rows.get(2))
-    expect(rows.get(1)!).toBeLessThan(AXIS_ROW_MIN)
+    /* 摊到每节之后离单节上限还远，不会因为连堂课把整行顶满 */
+    expect(rows.get(1)!).toBeLessThan(AXIS_ROW / 2)
     const axis = buildAxis(grid, undefined, rows)
-    expect(axis.y(580) - axis.y(480)).toBe(2 * AXIS_ROW_MIN + AXIS_GAP)
+    const per = Math.max(AXIS_ROW_MIN, Math.ceil(rows.get(1)!))
+    expect(axis.y(580) - axis.y(480)).toBe(2 * per + AXIS_GAP)
     expect(axis.y(580) - axis.y(480)).toBeGreaterThanOrEqual(cardNeed(w, card.name, card.loc))
   })
 
@@ -100,8 +119,9 @@ describe('gapLabel', () => {
 describe('textWidth', () => {
   it('全角按 1em，ASCII 更窄', () => {
     expect(textWidth('理教', 10)).toBe(20)
-    expect(textWidth('A1', 10)).toBeCloseTo(13.6)
-    expect(textWidth('理教 204', 10)).toBeCloseTo(20 + 3 + 19.2)
+    /* 数字按 0.67em：9px 半粗数字实测约 6px，早先按 0.64 估会把「4教403」算窄一像素，被省略号吃掉最后一个字 */
+    expect(textWidth('A1', 10)).toBeCloseTo(13.9)
+    expect(textWidth('理教 204', 10)).toBeCloseTo(20 + 3 + 20.1)
   })
 })
 
@@ -119,9 +139,17 @@ describe('cardFit', () => {
 
   it('地点排不下时先去空格，再从头部截、保留房号', () => {
     expect(fitLoc('理教 204', 2, W)).toBe('理教 204')
+    /* 一行只放得下 3 个字＋房号的列宽（W=39 → 可用 34px，'楼 A302' 约 35px 排不下，'楼A302' 约 33px 正好） */
     expect(fitLoc('楼 A302', 1, W)).toBe('楼A302')
     expect(fitLoc('第二教学楼 B-301', 2, W)).toBe('…学楼B-301')
-    expect(fitLoc('一号教学楼 A 302', 1, W)).toBe('…A302')
+    expect(fitLoc('一号教学楼 A 302', 1, 42)).toBe('…A302')
+  })
+
+  it('地点放不下时先摘掉括号里的校区，房号要留着', () => {
+    /* 一行放不下、两行放得下：原样给两行，不要提前截 */
+    expect(fitLoc('(罗文)2教301', 2, 39)).toBe('(罗文)2教301')
+    /* 只给一行：丢掉「(罗文)」，保住「2教301」 */
+    expect(fitLoc('(罗文)2教301', 1, 39)).toBe('2教301')
   })
 
   it('两节连上：足够高时课名、地点都不截断', () => {

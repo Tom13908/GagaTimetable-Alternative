@@ -48,7 +48,10 @@ function hydratePrefs(raw: unknown): Prefs {
   const d = defaultPrefs()
   const p = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const nums = (v: unknown, fallback: number[]) => (Array.isArray(v) && v.every((x) => typeof x === 'number') ? (v as number[]) : fallback)
+  const bool = (v: unknown, fallback: boolean) => (typeof v === 'boolean' ? v : fallback)
   return {
+    classRemind: bool(p.classRemind, d.classRemind),
+    taskRemind: bool(p.taskRemind, d.taskRemind),
     classLead: typeof p.classLead === 'number' && p.classLead > 0 ? p.classLead : d.classLead,
     earlyLead: typeof p.earlyLead === 'number' ? p.earlyLead : d.earlyLead,
     taskLeads: nums(p.taskLeads, d.taskLeads),
@@ -60,15 +63,51 @@ function hydratePrefs(raw: unknown): Prefs {
   }
 }
 
-/** 从持久化读回的原始对象补齐类型：周次位掩码转 bigint，新字段补默认值 */
+/** 读回时的兜底：持久化里的数组字段缺了/不是数组，一律当空数组，别让一处损坏带走整份数据 */
+const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : [])
+
+/** weeksMask 读回：历史上有字符串、数字；都不是就返回 null，交给调用方丢掉这一条 */
+function maskOf(v: unknown): bigint | null {
+  if (typeof v === 'bigint') return v
+  if (typeof v === 'number' && Number.isFinite(v)) return BigInt(Math.trunc(v))
+  if (typeof v === 'string' && /^\d+$/.test(v)) return BigInt(v)
+  return null
+}
+
+/** 从持久化读回的原始对象补齐类型：周次位掩码转 bigint，新字段补默认值。
+    **这里的容错是数据安全的一部分**：任何一处抛异常，调用方（load）会整份丢弃，
+    用户看到的就是课表全没了。所以字段缺失按空处理、坏规则单条丢弃、坏学期视为没有学期。 */
 export function hydrate(s: State): State {
-  for (const r of s.rules) r.weeksMask = BigInt(r.weeksMask as unknown as string)
-  if (!s.archives) s.archives = []
-  for (const a of s.archives) for (const r of a.rules) r.weeksMask = BigInt(r.weeksMask as unknown as string)
-  if (!s.savedRules || s.savedRules.length === 0) s.savedRules = [...BUILTIN_RULES]
-  if (!s.tasks) s.tasks = []
-  for (const t of s.tasks) if (!t.photos) t.photos = []
+  s.rules = asArray<SessionRule>(s.rules).filter((r) => {
+    const m = r ? maskOf(r.weeksMask) : null
+    if (m == null) return false
+    r.weeksMask = m
+    return true
+  })
+  s.courses = asArray<Course>(s.courses).filter((c) => !!c && typeof c.id === 'string')
+  s.overrides = asArray<Override>(s.overrides).filter((o) => !!o && typeof o.ruleId === 'string')
+  s.entries = asArray<UserEntry>(s.entries).filter((e) => !!e && typeof e.id === 'string')
+  s.batches = asArray(s.batches)
+  s.changes = asArray(s.changes)
+  s.userEditedCourseIds = Array.isArray(s.userEditedCourseIds) ? s.userEditedCourseIds.filter((x) => typeof x === 'string') : []
+  s.archives = asArray<SemesterArchive>(s.archives).filter((a) => !!a?.semester)
+  for (const a of s.archives) {
+    a.rules = asArray<SessionRule>(a.rules).filter((r) => {
+      const m = r ? maskOf(r.weeksMask) : null
+      if (m == null) return false
+      r.weeksMask = m
+      return true
+    })
+    a.courses = asArray<Course>(a.courses)
+    a.overrides = asArray<Override>(a.overrides)
+    a.entries = asArray<UserEntry>(a.entries)
+  }
+  if (!s.savedRules || !Array.isArray(s.savedRules) || s.savedRules.length === 0) s.savedRules = [...BUILTIN_RULES]
+  s.tasks = asArray<Task>(s.tasks).filter((t) => !!t && typeof t.id === 'string')
+  for (const t of s.tasks) if (!Array.isArray(t.photos)) t.photos = []
   s.prefs = hydratePrefs(s.prefs)
+  /* 学期缺 timeGrid / startDate 的，后面的排课和画轴都会崩，直接当没有学期（进引导页，数据还在） */
+  if (s.semester && (!Array.isArray(s.semester.timeGrid) || typeof s.semester.startDate !== 'string')) s.semester = null
   if ((s.version ?? 1) < 2) {
     // v1 身份键带 星期|起始节，去掉后才能和新导入对上
     const strip = (c: Course) => { c.identityKey = c.identityKey.replace(/\|\d+\|\d+$/, '') }
@@ -104,15 +143,32 @@ const KEY = 'timetable.v1'
 
 export const localStoragePersistence: Persistence = {
   load() {
+    let raw: string | null = null
     try {
-      const raw = localStorage.getItem(KEY)
-      return raw ? restoreState(raw, (json, v) => localStorage.setItem(`${KEY}.bak.v${v}`, json)) : null
+      raw = localStorage.getItem(KEY)
     } catch {
+      return null // 隐私模式 / 存储被禁：连读都读不到，只能从空开始
+    }
+    if (!raw) return null
+    try {
+      return restoreState(raw, (json, v) => localStorage.setItem(`${KEY}.bak.v${v}`, json))
+    } catch {
+      /* 解析失败：先把原文另存一份。否则下一次 save 就会用空状态把这份仅存的数据覆盖掉，
+         用户连事后抢救的机会都没有。 */
+      try {
+        localStorage.setItem(`${KEY}.corrupt.${Date.now()}`, raw)
+      } catch {
+        /* 存不下就只能放弃备份 */
+      }
       return null
     }
   },
   save(s) {
-    localStorage.setItem(KEY, serializeState(s))
+    try {
+      localStorage.setItem(KEY, serializeState(s))
+    } catch {
+      /* 配额满或被禁：吞掉异常，别让未捕获的 rejection 把整页带崩；内存里的状态仍然是对的 */
+    }
   },
 }
 

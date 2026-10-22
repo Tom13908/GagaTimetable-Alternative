@@ -27,11 +27,19 @@ export async function createSqlitePersistence(): Promise<Persistence> {
   const res = await db.query(`SELECT json FROM ${TABLE} WHERE id = 1;`)
   const raw = res.values?.[0]?.json as string | undefined
   const backups: Promise<unknown>[] = []
-  const initial: State | null = raw
-    ? restoreState(raw, (json, version) => {
+  let initial: State | null = null
+  if (raw) {
+    try {
+      initial = restoreState(raw, (json, version) => {
         backups.push(db.run(`INSERT OR IGNORE INTO ${BACKUP} (version, json, at) VALUES (?, ?, ?);`, [version, json, Date.now()]))
       })
-    : null
+    } catch {
+      /* 库里这份解析不了：原文另存一行（负数版本号避开正常迁移备份），
+         这次先从空状态启动，但数据还在表里，可以被人工捞回来。直接抛会让 App 打不开。 */
+      backups.push(db.run(`INSERT OR REPLACE INTO ${BACKUP} (version, json, at) VALUES (?, ?, ?);`, [-Date.now(), raw, Date.now()]).catch(() => undefined))
+      initial = null
+    }
+  }
   await Promise.all(backups)
 
   let writing = false

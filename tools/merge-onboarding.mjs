@@ -39,6 +39,6 @@ await sharp({
 })
   .composite(composites)
   .png()
-  .toFile('C:\\Users\\Shuakami_Projects\\Mine\\timetable\\docs\\screenshots\\onboarding-group.png');
+  .toFile(new URL('../docs/screenshots/onboarding-group.png', import.meta.url).pathname);
 
 console.log('done');
