@@ -2,6 +2,7 @@ name: Release
 
 # tag 推送发版；main 推送只编译不发版，用来预热缓存（Actions 缓存按 ref 隔离，tag 只能读到默认分支的）
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
